@@ -1,0 +1,6 @@
+openai>=1.99.0
+pytest>=7.0.0
+sentencepiece>=0.1.99
+torch>=2.1.0
+tqdm>=4.66.0
+transformers>=4.36.2
