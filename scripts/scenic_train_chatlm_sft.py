@@ -41,6 +41,7 @@ class RegularSFTConfig:
     max_target_length: int = 96
     max_grad_norm: float = 1.0
     seed: int = 42
+    max_examples: int | None = None
     fp16: bool = False
     bf16: bool = False
     device: str = "auto"
@@ -180,7 +181,9 @@ def load_chatlm_stack(config: RegularSFTConfig) -> tuple[Any, Any, Any]:
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
     device = resolve_device(config.device)
+    print(f"Loading tokenizer from {config.model_name_or_path}...", flush=True)
     tokenizer = AutoTokenizer.from_pretrained(config.model_name_or_path, trust_remote_code=True)
+    print(f"Loading model from {config.model_name_or_path}...", flush=True)
     model = AutoModelForSeq2SeqLM.from_pretrained(config.model_name_or_path, trust_remote_code=True)
 
     if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
@@ -189,6 +192,7 @@ def load_chatlm_stack(config: RegularSFTConfig) -> tuple[Any, Any, Any]:
     model.to(device)
     if hasattr(model.config, "use_cache"):
         model.config.use_cache = False
+    print(f"Model loaded on {device}.", flush=True)
     return tokenizer, model, device
 
 
@@ -322,6 +326,9 @@ def train_regular_sft(config: RegularSFTConfig | None = None) -> Path:
     config = config or RegularSFTConfig()
     seed_everything(config.seed)
     examples = load_regular_examples(config.train_json)
+    if config.max_examples is not None:
+        examples = examples[: config.max_examples]
+    print(f"Loaded {len(examples)} regular SFT examples from {config.train_json}.", flush=True)
     tokenizer, model, device = load_chatlm_stack(config)
     dataloader = make_dataloader(
         examples,
@@ -332,6 +339,7 @@ def train_regular_sft(config: RegularSFTConfig | None = None) -> Path:
     )
     optimizer, scheduler = make_optimizer_and_scheduler(model, config, len(dataloader))
     scaler = torch.cuda.amp.GradScaler(enabled=config.fp16 and device.type == "cuda" and not config.bf16)
+    print(f"Starting regular SFT: {config.epochs} epoch(s), {len(dataloader)} batch(es)/epoch.", flush=True)
 
     global_step = 0
     model.train()
@@ -397,6 +405,9 @@ def train_contrastive_triplet_sft(config: ContrastiveSFTConfig | None = None) ->
 
     seed_everything(config.seed)
     examples = load_contrastive_examples(config.train_json, negative_field=config.negative_field)
+    if config.max_examples is not None:
+        examples = examples[: config.max_examples]
+    print(f"Loaded {len(examples)} contrastive tuples from {config.train_json}.", flush=True)
     tokenizer, model, device = load_chatlm_stack(config)
     dataloader = make_dataloader(
         examples,
@@ -407,6 +418,7 @@ def train_contrastive_triplet_sft(config: ContrastiveSFTConfig | None = None) ->
     )
     optimizer, scheduler = make_optimizer_and_scheduler(model, config, len(dataloader))
     scaler = torch.cuda.amp.GradScaler(enabled=config.fp16 and device.type == "cuda" and not config.bf16)
+    print(f"Starting triplet SFT: {config.epochs} epoch(s), {len(dataloader)} batch(es)/epoch.", flush=True)
 
     global_step = 0
     model.train()
@@ -497,6 +509,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-target-length", type=int, default=96)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--max-examples", type=int, default=None, help="Use only the first N examples for a smoke test.")
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda, cuda:0, or mps.")
     parser.add_argument("--fp16", action="store_true", help="Use CUDA fp16 autocast.")
     parser.add_argument("--bf16", action="store_true", help="Use CUDA bf16 autocast.")
@@ -531,6 +544,7 @@ def regular_config_from_args(args: argparse.Namespace) -> RegularSFTConfig:
         max_target_length=args.max_target_length,
         max_grad_norm=args.max_grad_norm,
         seed=args.seed,
+        max_examples=args.max_examples,
         fp16=args.fp16,
         bf16=args.bf16,
         device=args.device,
@@ -557,6 +571,7 @@ def contrastive_config_from_args(args: argparse.Namespace) -> ContrastiveSFTConf
         max_target_length=args.max_target_length,
         max_grad_norm=args.max_grad_norm,
         seed=args.seed,
+        max_examples=args.max_examples,
         fp16=args.fp16,
         bf16=args.bf16,
         device=args.device,

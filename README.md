@@ -31,6 +31,12 @@ python3 scripts/scenic_train_chatlm_sft.py --mode contrastive --dry-run
 python3 -m pytest
 ```
 
+Run a tiny smoke training job before a full epoch run:
+
+```bash
+python3 scripts/scenic_train_chatlm_sft.py --mode regular --epochs 1 --max-examples 16 --batch-size 2
+```
+
 Run training:
 
 ```bash
