@@ -23,10 +23,27 @@ Install dependencies:
 conda create -n scenic-ed python=3.10 -y
 conda activate scenic-ed
 python -m pip install -U pip
+python -m pip uninstall -y torch torchvision torchaudio
 python -m pip install -r requirements.txt
 ```
 
-`requirements.txt` is a lock-style export from a working Python 3.10 environment so another machine can recreate the same dependency graph.
+`requirements.txt` installs the CUDA 12.8 PyTorch wheel on Linux, which is the right match for NVIDIA H20 machines with driver `570.124.06`.
+
+Verify the CUDA wheel after install:
+
+```bash
+python - <<'PY'
+import torch
+print("torch:", torch.__version__)
+print("torch cuda runtime:", torch.version.cuda)
+print("cuda available:", torch.cuda.is_available())
+print("gpu count:", torch.cuda.device_count())
+for i in range(torch.cuda.device_count()):
+    print(i, torch.cuda.get_device_name(i))
+PY
+```
+
+Expected on the H20 box: `torch.__version__` contains `+cu128`, `torch.version.cuda` is `12.8`, and `gpu count` is `8`.
 
 Run quick data checks:
 
