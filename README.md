@@ -62,4 +62,55 @@ python3 scripts/scenic_train_chatlm_sft.py --mode regular --epochs 3
 python3 scripts/scenic_train_chatlm_sft.py --mode contrastive --epochs 3 --alignment-weight 0.1 --margin 0.5
 ```
 
+On a multi-GPU NVIDIA machine, launch with `torchrun`. `--batch-size` is per GPU, so this example has a global batch of `16 * 8 = 128` before gradient accumulation:
+
+```bash
+torchrun --standalone --nproc_per_node=8 scripts/scenic_train_chatlm_sft.py \
+  --mode regular \
+  --epochs 3 \
+  --bf16 \
+  --batch-size 16 \
+  --gradient-accumulation-steps 1 \
+  --num-workers 4
+```
+
+Contrastive triplet SFT uses the same launcher:
+
+```bash
+torchrun --standalone --nproc_per_node=8 scripts/scenic_train_chatlm_sft.py \
+  --mode contrastive \
+  --epochs 3 \
+  --bf16 \
+  --batch-size 8 \
+  --gradient-accumulation-steps 1 \
+  --alignment-weight 0.1 \
+  --margin 0.5 \
+  --num-workers 4
+```
+
+For a quick 8-GPU smoke test:
+
+```bash
+torchrun --standalone --nproc_per_node=8 scripts/scenic_train_chatlm_sft.py \
+  --mode regular \
+  --epochs 1 \
+  --max-examples 128 \
+  --bf16 \
+  --batch-size 4
+```
+
+Check CUDA before training:
+
+```bash
+python - <<'PY'
+import torch
+print(torch.__version__)
+print(torch.cuda.is_available(), torch.cuda.device_count())
+for i in range(torch.cuda.device_count()):
+    print(i, torch.cuda.get_device_name(i))
+PY
+```
+
+Single-process `python scripts/scenic_train_chatlm_sft.py ...` uses one GPU. Use `torchrun --nproc_per_node=8` to use all 8 H20 GPUs.
+
 The model path, dataset paths, and output directories can also be changed directly at the top of `scripts/scenic_train_chatlm_sft.py`.

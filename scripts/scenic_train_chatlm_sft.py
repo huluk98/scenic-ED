@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import random
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -24,6 +25,18 @@ PROMPT_FIELDS = ("prompt", "instruction", "question", "input", "anchor", "x")
 RESPONSE_FIELDS = ("response", "output", "answer", "completion", "target", "y")
 POSITIVE_FIELDS = ("positive", "pos", "x_positive", "x_plus", "chosen")
 NEGATIVE_FIELDS = ("negative", "neg", "x_negative", "x_minus", "rejected")
+
+
+@dataclass
+class DistributedState:
+    enabled: bool = False
+    rank: int = 0
+    local_rank: int = 0
+    world_size: int = 1
+
+    @property
+    def is_main(self) -> bool:
+        return self.rank == 0
 
 
 @dataclass
@@ -157,9 +170,49 @@ def load_contrastive_examples(path: Path, negative_field: str = "negative") -> l
     return examples
 
 
-def resolve_device(device_name: str) -> Any:
+def setup_distributed() -> DistributedState:
+    import torch
+    import torch.distributed as dist
+
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size <= 1:
+        return DistributedState()
+    if not torch.cuda.is_available():
+        raise RuntimeError("Distributed training requires CUDA. Use a single-process CPU/MPS run instead.")
+
+    local_rank = int(os.environ["LOCAL_RANK"])
+    rank = int(os.environ["RANK"])
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl")
+    return DistributedState(enabled=True, rank=rank, local_rank=local_rank, world_size=world_size)
+
+
+def cleanup_distributed(state: DistributedState) -> None:
+    if not state.enabled:
+        return
+    import torch.distributed as dist
+
+    dist.destroy_process_group()
+
+
+def sync_distributed(state: DistributedState) -> None:
+    if not state.enabled:
+        return
+    import torch.distributed as dist
+
+    dist.barrier()
+
+
+def rank0_print(state: DistributedState, message: str) -> None:
+    if state.is_main:
+        print(message, flush=True)
+
+
+def resolve_device(device_name: str, state: DistributedState) -> Any:
     import torch
 
+    if state.enabled:
+        return torch.device("cuda", state.local_rank)
     if device_name != "auto":
         return torch.device(device_name)
     if torch.cuda.is_available():
@@ -178,11 +231,24 @@ def seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def load_chatlm_stack(config: RegularSFTConfig) -> tuple[Any, Any, Any]:
+def unwrap_model(model: Any) -> Any:
+    while hasattr(model, "module"):
+        model = model.module
+    return model
+
+
+def model_for_save(model: Any) -> Any:
+    model = unwrap_model(model)
+    if hasattr(model, "base_model"):
+        return model.base_model
+    return model
+
+
+def load_chatlm_stack(config: RegularSFTConfig, state: DistributedState) -> tuple[Any, Any, Any]:
     import torch
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
-    device = resolve_device(config.device)
+    device = resolve_device(config.device, state)
     load_kwargs: dict[str, Any] = {
         "trust_remote_code": True,
         "local_files_only": config.local_files_only,
@@ -190,13 +256,13 @@ def load_chatlm_stack(config: RegularSFTConfig) -> tuple[Any, Any, Any]:
     if config.cache_dir is not None:
         load_kwargs["cache_dir"] = str(config.cache_dir.expanduser())
 
-    print(f"Loading tokenizer from {config.model_name_or_path}...", flush=True)
+    rank0_print(state, f"Loading tokenizer from {config.model_name_or_path}...")
     try:
         tokenizer = AutoTokenizer.from_pretrained(config.model_name_or_path, **load_kwargs)
     except Exception as exc:
         raise_model_load_error(config, exc)
 
-    print(f"Loading model from {config.model_name_or_path}...", flush=True)
+    rank0_print(state, f"Loading model from {config.model_name_or_path}...")
     try:
         model = AutoModelForSeq2SeqLM.from_pretrained(config.model_name_or_path, **load_kwargs)
     except Exception as exc:
@@ -208,7 +274,7 @@ def load_chatlm_stack(config: RegularSFTConfig) -> tuple[Any, Any, Any]:
     model.to(device)
     if hasattr(model.config, "use_cache"):
         model.config.use_cache = False
-    print(f"Model loaded on {device}.", flush=True)
+    rank0_print(state, f"Model loaded on {device}.")
     return tokenizer, model, device
 
 
@@ -302,16 +368,32 @@ def make_contrastive_collate(
     return collate
 
 
-def make_dataloader(examples: list[dict[str, str]], batch_size: int, shuffle: bool, collate_fn: Any, num_workers: int) -> Any:
-    from torch.utils.data import DataLoader
+def make_dataloader(
+    examples: list[dict[str, str]],
+    batch_size: int,
+    shuffle: bool,
+    collate_fn: Any,
+    num_workers: int,
+    state: DistributedState,
+) -> tuple[Any, Any]:
+    from torch.utils.data import DataLoader, DistributedSampler
 
-    return DataLoader(
+    sampler = DistributedSampler(
+        examples,
+        num_replicas=state.world_size,
+        rank=state.rank,
+        shuffle=shuffle,
+    ) if state.enabled else None
+
+    dataloader = DataLoader(
         examples,
         batch_size=batch_size,
-        shuffle=shuffle,
+        shuffle=shuffle and sampler is None,
+        sampler=sampler,
         collate_fn=collate_fn,
         num_workers=num_workers,
     )
+    return dataloader, sampler
 
 
 def make_optimizer_and_scheduler(model: Any, config: RegularSFTConfig, batches_per_epoch: int) -> tuple[Any, Any]:
@@ -346,7 +428,67 @@ def autocast_context(config: RegularSFTConfig, device: Any) -> Any:
 def save_model(tokenizer: Any, model: Any, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     tokenizer.save_pretrained(output_dir)
-    model.save_pretrained(output_dir)
+    model_for_save(model).save_pretrained(output_dir)
+
+
+class TripletSFTModule:
+    def __init__(self, base_model: Any) -> None:
+        import torch
+
+        class _TripletSFTModule(torch.nn.Module):
+            def __init__(self, wrapped_model: Any) -> None:
+                super().__init__()
+                self.base_model = wrapped_model
+
+            def forward(
+                self,
+                anchor: dict[str, Any],
+                positive: dict[str, Any],
+                negative: dict[str, Any],
+                labels: Any,
+                margin: float,
+                alignment_weight: float,
+            ) -> tuple[Any, Any, Any]:
+                import torch.nn.functional as functional
+
+                anchor_outputs = self.base_model(**anchor, labels=labels, return_dict=True)
+                positive_outputs = self.base_model(**positive, labels=labels, return_dict=True)
+                gen_loss = 0.5 * (anchor_outputs.loss + positive_outputs.loss)
+
+                encoder = self.base_model.get_encoder()
+                negative_outputs = encoder(
+                    input_ids=negative["input_ids"],
+                    attention_mask=negative.get("attention_mask"),
+                    return_dict=True,
+                )
+                anchor_rep = mean_pool_encoder(anchor_outputs.encoder_last_hidden_state, anchor["attention_mask"])
+                positive_rep = mean_pool_encoder(positive_outputs.encoder_last_hidden_state, positive["attention_mask"])
+                negative_rep = mean_pool_encoder(negative_outputs.last_hidden_state, negative["attention_mask"])
+
+                positive_distance = 1.0 - (anchor_rep * positive_rep).sum(dim=-1)
+                negative_distance = 1.0 - (anchor_rep * negative_rep).sum(dim=-1)
+                align_loss = functional.relu(margin + positive_distance - negative_distance).mean()
+                loss = gen_loss + alignment_weight * align_loss
+                return loss, gen_loss, align_loss
+
+        self.module = _TripletSFTModule(base_model)
+
+
+def wrap_for_distributed(model: Any, state: DistributedState, mode: str) -> Any:
+    if mode == "contrastive":
+        model = TripletSFTModule(model).module
+    if not state.enabled:
+        return model
+
+    import torch
+    from torch.nn.parallel import DistributedDataParallel
+
+    return DistributedDataParallel(
+        model,
+        device_ids=[state.local_rank],
+        output_device=state.local_rank,
+        find_unused_parameters=False,
+    )
 
 
 def train_regular_sft(config: RegularSFTConfig | None = None) -> Path:
@@ -354,28 +496,38 @@ def train_regular_sft(config: RegularSFTConfig | None = None) -> Path:
     from tqdm.auto import tqdm
 
     config = config or RegularSFTConfig()
+    state = setup_distributed()
     seed_everything(config.seed)
     examples = load_regular_examples(config.train_json)
     if config.max_examples is not None:
         examples = examples[: config.max_examples]
-    print(f"Loaded {len(examples)} regular SFT examples from {config.train_json}.", flush=True)
-    tokenizer, model, device = load_chatlm_stack(config)
-    dataloader = make_dataloader(
+    rank0_print(state, f"Loaded {len(examples)} regular SFT examples from {config.train_json}.")
+    tokenizer, model, device = load_chatlm_stack(config, state)
+    model = wrap_for_distributed(model, state, mode="regular")
+    dataloader, sampler = make_dataloader(
         examples,
         batch_size=config.batch_size,
         shuffle=True,
         collate_fn=make_regular_collate(tokenizer, config),
         num_workers=config.num_workers,
+        state=state,
     )
     optimizer, scheduler = make_optimizer_and_scheduler(model, config, len(dataloader))
     scaler = torch.cuda.amp.GradScaler(enabled=config.fp16 and device.type == "cuda" and not config.bf16)
-    print(f"Starting regular SFT: {config.epochs} epoch(s), {len(dataloader)} batch(es)/epoch.", flush=True)
+    rank0_print(
+        state,
+        "Starting regular SFT: "
+        f"{config.epochs} epoch(s), {len(dataloader)} batch(es)/epoch/process, "
+        f"world_size={state.world_size}, per_gpu_batch={config.batch_size}.",
+    )
 
     global_step = 0
     model.train()
     optimizer.zero_grad(set_to_none=True)
     for epoch in range(1, config.epochs + 1):
-        progress = tqdm(dataloader, desc=f"regular sft epoch {epoch}/{config.epochs}")
+        if sampler is not None:
+            sampler.set_epoch(epoch)
+        progress = tqdm(dataloader, desc=f"regular sft epoch {epoch}/{config.epochs}", disable=not state.is_main)
         running_loss = 0.0
         for batch_index, batch in enumerate(progress, start=1):
             batch = move_batch_to_device(batch, device)
@@ -397,12 +549,16 @@ def train_regular_sft(config: RegularSFTConfig | None = None) -> Path:
 
                 if config.log_every and global_step % config.log_every == 0:
                     progress.set_postfix(loss=f"{running_loss / batch_index:.4f}", step=global_step)
-                if config.save_every_steps and global_step % config.save_every_steps == 0:
+                if state.is_main and config.save_every_steps and global_step % config.save_every_steps == 0:
                     save_model(tokenizer, model, config.output_dir / f"checkpoint-step-{global_step}")
 
-        save_model(tokenizer, model, config.output_dir / f"checkpoint-epoch-{epoch}")
+        if state.is_main:
+            save_model(tokenizer, model, config.output_dir / f"checkpoint-epoch-{epoch}")
 
-    save_model(tokenizer, model, config.output_dir)
+    if state.is_main:
+        save_model(tokenizer, model, config.output_dir)
+    sync_distributed(state)
+    cleanup_distributed(state)
     return config.output_dir
 
 
@@ -415,7 +571,7 @@ def mean_pool_encoder(hidden_states: Any, attention_mask: Any) -> Any:
 
 
 def encoder_representation(model: Any, encoded_inputs: dict[str, Any]) -> Any:
-    encoder = model.get_encoder()
+    encoder = model_for_save(model).get_encoder()
     outputs = encoder(
         input_ids=encoded_inputs["input_ids"],
         attention_mask=encoded_inputs.get("attention_mask"),
@@ -426,35 +582,44 @@ def encoder_representation(model: Any, encoded_inputs: dict[str, Any]) -> Any:
 
 def train_contrastive_triplet_sft(config: ContrastiveSFTConfig | None = None) -> Path:
     import torch
-    import torch.nn.functional as functional
     from tqdm.auto import tqdm
 
     config = config or ContrastiveSFTConfig()
     if not 0.0 < config.margin < 2.0:
         raise ValueError("Triplet margin should be in (0, 2) for cosine distance.")
 
+    state = setup_distributed()
     seed_everything(config.seed)
     examples = load_contrastive_examples(config.train_json, negative_field=config.negative_field)
     if config.max_examples is not None:
         examples = examples[: config.max_examples]
-    print(f"Loaded {len(examples)} contrastive tuples from {config.train_json}.", flush=True)
-    tokenizer, model, device = load_chatlm_stack(config)
-    dataloader = make_dataloader(
+    rank0_print(state, f"Loaded {len(examples)} contrastive tuples from {config.train_json}.")
+    tokenizer, model, device = load_chatlm_stack(config, state)
+    model = wrap_for_distributed(model, state, mode="contrastive")
+    dataloader, sampler = make_dataloader(
         examples,
         batch_size=config.batch_size,
         shuffle=True,
         collate_fn=make_contrastive_collate(tokenizer, config),
         num_workers=config.num_workers,
+        state=state,
     )
     optimizer, scheduler = make_optimizer_and_scheduler(model, config, len(dataloader))
     scaler = torch.cuda.amp.GradScaler(enabled=config.fp16 and device.type == "cuda" and not config.bf16)
-    print(f"Starting triplet SFT: {config.epochs} epoch(s), {len(dataloader)} batch(es)/epoch.", flush=True)
+    rank0_print(
+        state,
+        "Starting triplet SFT: "
+        f"{config.epochs} epoch(s), {len(dataloader)} batch(es)/epoch/process, "
+        f"world_size={state.world_size}, per_gpu_batch={config.batch_size}.",
+    )
 
     global_step = 0
     model.train()
     optimizer.zero_grad(set_to_none=True)
     for epoch in range(1, config.epochs + 1):
-        progress = tqdm(dataloader, desc=f"triplet sft epoch {epoch}/{config.epochs}")
+        if sampler is not None:
+            sampler.set_epoch(epoch)
+        progress = tqdm(dataloader, desc=f"triplet sft epoch {epoch}/{config.epochs}", disable=not state.is_main)
         running_total = 0.0
         running_gen = 0.0
         running_align = 0.0
@@ -465,18 +630,14 @@ def train_contrastive_triplet_sft(config: ContrastiveSFTConfig | None = None) ->
             labels = batch["labels"].to(device)
 
             with autocast_context(config, device):
-                anchor_gen_loss = model(**anchor, labels=labels).loss
-                positive_gen_loss = model(**positive, labels=labels).loss
-                gen_loss = 0.5 * (anchor_gen_loss + positive_gen_loss)
-
-                anchor_rep = encoder_representation(model, anchor)
-                positive_rep = encoder_representation(model, positive)
-                negative_rep = encoder_representation(model, negative)
-                positive_distance = 1.0 - (anchor_rep * positive_rep).sum(dim=-1)
-                negative_distance = 1.0 - (anchor_rep * negative_rep).sum(dim=-1)
-                align_loss = functional.relu(config.margin + positive_distance - negative_distance).mean()
-
-                loss = gen_loss + config.alignment_weight * align_loss
+                loss, gen_loss, align_loss = model(
+                    anchor=anchor,
+                    positive=positive,
+                    negative=negative,
+                    labels=labels,
+                    margin=config.margin,
+                    alignment_weight=config.alignment_weight,
+                )
                 scaled_loss = loss / config.gradient_accumulation_steps
 
             scaler.scale(scaled_loss).backward()
@@ -500,12 +661,16 @@ def train_contrastive_triplet_sft(config: ContrastiveSFTConfig | None = None) ->
                         align=f"{running_align / batch_index:.4f}",
                         step=global_step,
                     )
-                if config.save_every_steps and global_step % config.save_every_steps == 0:
+                if state.is_main and config.save_every_steps and global_step % config.save_every_steps == 0:
                     save_model(tokenizer, model, config.output_dir / f"checkpoint-step-{global_step}")
 
-        save_model(tokenizer, model, config.output_dir / f"checkpoint-epoch-{epoch}")
+        if state.is_main:
+            save_model(tokenizer, model, config.output_dir / f"checkpoint-epoch-{epoch}")
 
-    save_model(tokenizer, model, config.output_dir)
+    if state.is_main:
+        save_model(tokenizer, model, config.output_dir)
+    sync_distributed(state)
+    cleanup_distributed(state)
     return config.output_dir
 
 
