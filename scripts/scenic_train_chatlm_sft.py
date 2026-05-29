@@ -208,6 +208,12 @@ def rank0_print(state: DistributedState, message: str) -> None:
         print(message, flush=True)
 
 
+def force_huggingface_offline() -> None:
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    os.environ["HF_DATASETS_OFFLINE"] = "1"
+
+
 def resolve_device(device_name: str, state: DistributedState) -> Any:
     import torch
 
@@ -245,6 +251,9 @@ def model_for_save(model: Any) -> Any:
 
 
 def load_chatlm_stack(config: RegularSFTConfig, state: DistributedState) -> tuple[Any, Any, Any]:
+    if config.local_files_only:
+        force_huggingface_offline()
+
     import torch
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 

@@ -76,6 +76,8 @@ If an 8-GPU run fails at startup with `Cannot send a request, as the client has 
 
 ```bash
 huggingface-cli download charent/ChatLM-mini-Chinese --local-dir models/ChatLM-mini-Chinese
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
 torchrun --standalone --nproc_per_node=8 scripts/scenic_train_chatlm_sft.py \
   --mode regular \
   --model models/ChatLM-mini-Chinese \
@@ -84,6 +86,8 @@ torchrun --standalone --nproc_per_node=8 scripts/scenic_train_chatlm_sft.py \
   --bf16 \
   --batch-size 16
 ```
+
+Use the same local/offline pattern if loading weights succeeds but then fails on an SSL hostname mismatch for `additional_chat_templates`; that is a late Transformers Hub lookup, not a training failure.
 
 Run training:
 
