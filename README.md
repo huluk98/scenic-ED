@@ -72,6 +72,19 @@ huggingface-cli download charent/ChatLM-mini-Chinese --local-dir models/ChatLM-m
 python3 scripts/scenic_train_chatlm_sft.py --mode regular --model models/ChatLM-mini-Chinese --local-files-only --epochs 1 --max-examples 16
 ```
 
+If an 8-GPU run fails at startup with `Cannot send a request, as the client has been closed`, download the model once before launching DDP and then run with `--local-files-only`:
+
+```bash
+huggingface-cli download charent/ChatLM-mini-Chinese --local-dir models/ChatLM-mini-Chinese
+torchrun --standalone --nproc_per_node=8 scripts/scenic_train_chatlm_sft.py \
+  --mode regular \
+  --model models/ChatLM-mini-Chinese \
+  --local-files-only \
+  --epochs 3 \
+  --bf16 \
+  --batch-size 16
+```
+
 Run training:
 
 ```bash

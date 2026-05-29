@@ -256,6 +256,12 @@ def load_chatlm_stack(config: RegularSFTConfig, state: DistributedState) -> tupl
     if config.cache_dir is not None:
         load_kwargs["cache_dir"] = str(config.cache_dir.expanduser())
 
+    # In DDP, let rank 0 touch the network/cache first. Otherwise eight ranks can
+    # simultaneously initialize Hugging Face HTTP clients and mutate the same cache.
+    if state.enabled and not state.is_main and not config.local_files_only:
+        sync_distributed(state)
+        load_kwargs["local_files_only"] = True
+
     rank0_print(state, f"Loading tokenizer from {config.model_name_or_path}...")
     try:
         tokenizer = AutoTokenizer.from_pretrained(config.model_name_or_path, **load_kwargs)
@@ -275,6 +281,8 @@ def load_chatlm_stack(config: RegularSFTConfig, state: DistributedState) -> tupl
     if hasattr(model.config, "use_cache"):
         model.config.use_cache = False
     rank0_print(state, f"Model loaded on {device}.")
+    if state.enabled and state.is_main and not config.local_files_only:
+        sync_distributed(state)
     return tokenizer, model, device
 
 
