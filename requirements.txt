@@ -1,8 +1,17 @@
-certifi>=2024.2.2
-huggingface_hub>=0.23.0
-openai>=1.99.0
-pytest>=7.0.0
-sentencepiece>=0.1.99
-torch>=2.1.0
-tqdm>=4.66.0
-transformers>=4.36.2
+# Recommended base:
+#   conda create -n scenic-ed python=3.10 -y
+#   conda activate scenic-ed
+#   python -m pip install -U pip
+#   python -m pip install -r requirements.txt
+#
+# Known-good versions from the scenic-ed env created on 2026-05-29.
+certifi==2026.5.20
+huggingface_hub==1.17.0
+openai==2.38.0
+pytest==9.0.3
+requests==2.34.2
+sentencepiece==0.2.1
+torch==2.12.0
+tqdm==4.67.3
+transformers==5.9.0
+urllib3==2.7.0

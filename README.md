@@ -20,7 +20,10 @@ Older intermediate datasets, audits, reports, and expansion files are intentiona
 Install dependencies:
 
 ```bash
-python3 -m pip install -r requirements.txt
+conda create -n scenic-ed python=3.10 -y
+conda activate scenic-ed
+python -m pip install -U pip
+python -m pip install -r requirements.txt
 ```
 
 Run quick data checks:
