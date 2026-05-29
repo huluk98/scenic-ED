@@ -26,6 +26,8 @@ python -m pip install -U pip
 python -m pip install -r requirements.txt
 ```
 
+`requirements.txt` is a lock-style export from a working Python 3.10 environment so another machine can recreate the same dependency graph.
+
 Run quick data checks:
 
 ```bash
