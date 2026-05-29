@@ -1,3 +1,5 @@
+certifi>=2024.2.2
+huggingface_hub>=0.23.0
 openai>=1.99.0
 pytest>=7.0.0
 sentencepiece>=0.1.99

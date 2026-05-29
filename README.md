@@ -37,6 +37,19 @@ Run a tiny smoke training job before a full epoch run:
 python3 scripts/scenic_train_chatlm_sft.py --mode regular --epochs 1 --max-examples 16 --batch-size 2
 ```
 
+If Hugging Face download fails with an SSL certificate or hostname mismatch error, first refresh the local Python certificate stack:
+
+```bash
+python3 -m pip install -U certifi huggingface_hub transformers requests urllib3
+```
+
+If the network still rewrites Hugging Face certificates, download the model once from a working network and train from the local directory:
+
+```bash
+huggingface-cli download charent/ChatLM-mini-Chinese --local-dir models/ChatLM-mini-Chinese
+python3 scripts/scenic_train_chatlm_sft.py --mode regular --model models/ChatLM-mini-Chinese --local-files-only --epochs 1 --max-examples 16
+```
+
 Run training:
 
 ```bash

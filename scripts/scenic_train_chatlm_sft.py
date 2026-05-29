@@ -42,6 +42,8 @@ class RegularSFTConfig:
     max_grad_norm: float = 1.0
     seed: int = 42
     max_examples: int | None = None
+    cache_dir: Path | None = None
+    local_files_only: bool = False
     fp16: bool = False
     bf16: bool = False
     device: str = "auto"
@@ -181,10 +183,24 @@ def load_chatlm_stack(config: RegularSFTConfig) -> tuple[Any, Any, Any]:
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
     device = resolve_device(config.device)
+    load_kwargs: dict[str, Any] = {
+        "trust_remote_code": True,
+        "local_files_only": config.local_files_only,
+    }
+    if config.cache_dir is not None:
+        load_kwargs["cache_dir"] = str(config.cache_dir.expanduser())
+
     print(f"Loading tokenizer from {config.model_name_or_path}...", flush=True)
-    tokenizer = AutoTokenizer.from_pretrained(config.model_name_or_path, trust_remote_code=True)
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(config.model_name_or_path, **load_kwargs)
+    except Exception as exc:
+        raise_model_load_error(config, exc)
+
     print(f"Loading model from {config.model_name_or_path}...", flush=True)
-    model = AutoModelForSeq2SeqLM.from_pretrained(config.model_name_or_path, trust_remote_code=True)
+    try:
+        model = AutoModelForSeq2SeqLM.from_pretrained(config.model_name_or_path, **load_kwargs)
+    except Exception as exc:
+        raise_model_load_error(config, exc)
 
     if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -194,6 +210,20 @@ def load_chatlm_stack(config: RegularSFTConfig) -> tuple[Any, Any, Any]:
         model.config.use_cache = False
     print(f"Model loaded on {device}.", flush=True)
     return tokenizer, model, device
+
+
+def raise_model_load_error(config: RegularSFTConfig, exc: Exception) -> None:
+    message = str(exc).lower()
+    if "ssl" in message or "certificate" in message or "max retries" in message:
+        hint = (
+            "Failed to load ChatLM model files because the Hugging Face request hit an SSL/certificate error. "
+            "This is usually a VPN/proxy/captive-network/CA-bundle issue, not a training issue. "
+            "Try upgrading certifi/huggingface_hub/transformers, disabling the proxy or VPN, or download the model once "
+            "with `huggingface-cli download charent/ChatLM-mini-Chinese --local-dir models/ChatLM-mini-Chinese` "
+            "and rerun with `--model models/ChatLM-mini-Chinese --local-files-only`."
+        )
+        raise RuntimeError(hint) from exc
+    raise exc
 
 
 def tokenize_targets(tokenizer: Any, targets: list[str], max_length: int) -> Any:
@@ -510,6 +540,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-examples", type=int, default=None, help="Use only the first N examples for a smoke test.")
+    parser.add_argument("--cache-dir", default=None, help="Optional Hugging Face cache directory.")
+    parser.add_argument("--local-files-only", action="store_true", help="Load model/tokenizer only from local files.")
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda, cuda:0, or mps.")
     parser.add_argument("--fp16", action="store_true", help="Use CUDA fp16 autocast.")
     parser.add_argument("--bf16", action="store_true", help="Use CUDA bf16 autocast.")
@@ -545,6 +577,8 @@ def regular_config_from_args(args: argparse.Namespace) -> RegularSFTConfig:
         max_grad_norm=args.max_grad_norm,
         seed=args.seed,
         max_examples=args.max_examples,
+        cache_dir=Path(args.cache_dir).expanduser() if args.cache_dir else None,
+        local_files_only=args.local_files_only,
         fp16=args.fp16,
         bf16=args.bf16,
         device=args.device,
@@ -572,6 +606,8 @@ def contrastive_config_from_args(args: argparse.Namespace) -> ContrastiveSFTConf
         max_grad_norm=args.max_grad_norm,
         seed=args.seed,
         max_examples=args.max_examples,
+        cache_dir=Path(args.cache_dir).expanduser() if args.cache_dir else None,
+        local_files_only=args.local_files_only,
         fp16=args.fp16,
         bf16=args.bf16,
         device=args.device,
