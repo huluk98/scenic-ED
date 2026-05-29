@@ -89,6 +89,14 @@ torchrun --standalone --nproc_per_node=8 scripts/scenic_train_chatlm_sft.py \
 
 Use the same local/offline pattern if loading weights succeeds but then fails on an SSL hostname mismatch for `additional_chat_templates`; that is a late Transformers Hub lookup, not a training failure.
 
+If the model is already in the Hugging Face cache and `huggingface-cli download` fails, skip the download and find the cached snapshot:
+
+```bash
+python scripts/find_chatlm_cache.py
+```
+
+Then use the printed snapshot path with `--model <snapshot-path> --local-files-only`.
+
 Run training:
 
 ```bash
