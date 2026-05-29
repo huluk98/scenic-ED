@@ -97,6 +97,14 @@ python scripts/find_chatlm_cache.py
 
 Then use the printed snapshot path with `--model <snapshot-path> --local-files-only`.
 
+If Transformers still tries `HEAD generate.py` or another custom-code file, build a self-contained local model directory from the existing cache:
+
+```bash
+python scripts/prepare_chatlm_local_model.py
+```
+
+Then use the printed `models/ChatLM-mini-Chinese-local` path with `--local-files-only`.
+
 Run training:
 
 ```bash
