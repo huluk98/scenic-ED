@@ -264,6 +264,9 @@ def load_chatlm_stack(config: RegularSFTConfig, state: DistributedState) -> tupl
     }
     if config.cache_dir is not None:
         load_kwargs["cache_dir"] = str(config.cache_dir.expanduser())
+    dtype = model_load_dtype(config, device)
+    if dtype is not None:
+        load_kwargs["torch_dtype"] = dtype
 
     # In DDP, let rank 0 touch the network/cache first. Otherwise eight ranks can
     # simultaneously initialize Hugging Face HTTP clients and mutate the same cache.
@@ -295,6 +298,22 @@ def load_chatlm_stack(config: RegularSFTConfig, state: DistributedState) -> tupl
     return tokenizer, model, device
 
 
+def model_load_dtype(config: RegularSFTConfig, device: Any) -> Any | None:
+    if device.type != "cuda":
+        return None
+    import torch
+
+    if config.bf16:
+        return torch.bfloat16
+    if config.fp16:
+        return torch.float16
+    return None
+
+
+def pad_multiple(config: RegularSFTConfig) -> int | None:
+    return 8 if config.fp16 or config.bf16 else None
+
+
 def raise_model_load_error(config: RegularSFTConfig, exc: Exception) -> None:
     message = str(exc).lower()
     if "ssl" in message or "certificate" in message or "max retries" in message:
@@ -316,6 +335,7 @@ def tokenize_targets(tokenizer: Any, targets: list[str], max_length: int) -> Any
             padding=True,
             truncation=True,
             max_length=max_length,
+            pad_to_multiple_of=8,
             return_tensors="pt",
         )
     except TypeError:
@@ -325,6 +345,7 @@ def tokenize_targets(tokenizer: Any, targets: list[str], max_length: int) -> Any
                 padding=True,
                 truncation=True,
                 max_length=max_length,
+                pad_to_multiple_of=8,
                 return_tensors="pt",
             )
     return labels["input_ids"]
@@ -351,6 +372,7 @@ def make_regular_collate(tokenizer: Any, config: RegularSFTConfig) -> Callable[[
             padding=True,
             truncation=True,
             max_length=config.max_source_length,
+            pad_to_multiple_of=pad_multiple(config),
             return_tensors="pt",
         )
         labels = tokenize_targets(tokenizer, targets, config.max_target_length)
@@ -369,6 +391,7 @@ def make_contrastive_collate(
             padding=True,
             truncation=True,
             max_length=config.max_source_length,
+            pad_to_multiple_of=pad_multiple(config),
             return_tensors="pt",
         )
 

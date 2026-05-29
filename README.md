@@ -155,4 +155,6 @@ PY
 
 Single-process `python scripts/scenic_train_chatlm_sft.py ...` uses one GPU. Use `torchrun --nproc_per_node=8` to use all 8 H20 GPUs.
 
+For H20 speed, prefer `--bf16`. The trainer loads model weights in bfloat16 and pads batches to multiples of 8 when bf16/fp16 is enabled, matching the faster path used by the Encoder-Decoder training scripts.
+
 The model path, dataset paths, and output directories can also be changed directly at the top of `scripts/scenic_train_chatlm_sft.py`.
