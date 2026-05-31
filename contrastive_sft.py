@@ -12,9 +12,6 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from scenic_train_chatlm_sft import (  # noqa: E402
-    CONTRASTIVE_OUTPUT_DIR,
-    CONTRASTIVE_TRAIN_JSON,
-    MODEL_NAME_OR_PATH,
     ContrastiveSFTConfig,
     print_dataset_summary,
     train_contrastive_triplet_sft,
@@ -22,17 +19,22 @@ from scenic_train_chatlm_sft import (  # noqa: E402
 
 
 # =====================================================
-# EDIT THESE DEFAULTS IF YOU WANT TO RUN WITHOUT FLAGS
+# CHANGE THESE PATHS DIRECTLY
 # =====================================================
-MODEL_PATH = MODEL_NAME_OR_PATH
+MODEL_PATH = "charent/ChatLM-mini-Chinese"
 # Examples:
 # MODEL_PATH = "charent/ChatLM-mini-Chinese"
 # MODEL_PATH = "models/ChatLM-mini-Chinese"
 # MODEL_PATH = "models/ChatLM-mini-Chinese-local"
 # MODEL_PATH = "/nvme1/home/luke/models/chatlm"
 
-TRAIN_JSON = CONTRASTIVE_TRAIN_JSON
-OUTPUT_DIR = CONTRASTIVE_OUTPUT_DIR
+TRAIN_JSON = str(PROJECT_ROOT / "data" / "SCENIC_full_anchor_positive_negative.json")
+# Example:
+# TRAIN_JSON = "/nvme1/home/luke/Encoder-Chinese-SLM/data/scenic/SCENIC_full_anchor_positive_negative.json"
+
+OUTPUT_DIR = str(PROJECT_ROOT / "models" / "chatlm_scenic_triplet_sft")
+# Example:
+# OUTPUT_DIR = "/nvme1/home/luke/Encoder-Chinese-SLM/sft_contrastive"
 
 EPOCHS = 3
 BATCH_SIZE = 4

@@ -155,6 +155,8 @@ torchrun --standalone --nproc_per_node=8 contrastive_sft.py \
   --num-workers 4
 ```
 
+For `contrastive_sft.py`, you can also paste your model, dataset, and output paths directly into the `MODEL_PATH`, `TRAIN_JSON`, and `OUTPUT_DIR` variables at the top of the file and run it without those path flags.
+
 For a quick 8-GPU smoke test:
 
 ```bash
