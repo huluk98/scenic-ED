@@ -363,17 +363,24 @@ def move_batch_to_device(batch: dict[str, Any], device: Any) -> dict[str, Any]:
     return {key: value.to(device) for key, value in batch.items()}
 
 
+def remove_token_type_ids(encoded: Any) -> Any:
+    encoded.pop("token_type_ids", None)
+    return encoded
+
+
 def make_regular_collate(tokenizer: Any, config: RegularSFTConfig) -> Callable[[list[dict[str, str]]], dict[str, Any]]:
     def collate(batch: list[dict[str, str]]) -> dict[str, Any]:
         sources = [item["prompt"] for item in batch]
         targets = [item["response"] for item in batch]
-        encoded = tokenizer(
-            sources,
-            padding=True,
-            truncation=True,
-            max_length=config.max_source_length,
-            pad_to_multiple_of=pad_multiple(config),
-            return_tensors="pt",
+        encoded = remove_token_type_ids(
+            tokenizer(
+                sources,
+                padding=True,
+                truncation=True,
+                max_length=config.max_source_length,
+                pad_to_multiple_of=pad_multiple(config),
+                return_tensors="pt",
+            )
         )
         labels = tokenize_targets(tokenizer, targets, config.max_target_length)
         encoded["labels"] = mask_pad_tokens(labels, tokenizer.pad_token_id)
@@ -386,13 +393,15 @@ def make_contrastive_collate(
     tokenizer: Any, config: ContrastiveSFTConfig
 ) -> Callable[[list[dict[str, str]]], dict[str, Any]]:
     def encode_sources(texts: list[str]) -> dict[str, Any]:
-        return tokenizer(
-            texts,
-            padding=True,
-            truncation=True,
-            max_length=config.max_source_length,
-            pad_to_multiple_of=pad_multiple(config),
-            return_tensors="pt",
+        return remove_token_type_ids(
+            tokenizer(
+                texts,
+                padding=True,
+                truncation=True,
+                max_length=config.max_source_length,
+                pad_to_multiple_of=pad_multiple(config),
+                return_tensors="pt",
+            )
         )
 
     def collate(batch: list[dict[str, str]]) -> dict[str, Any]:
