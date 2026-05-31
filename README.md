@@ -50,6 +50,7 @@ Run quick data checks:
 ```bash
 python3 scripts/scenic_train_chatlm_sft.py --mode regular --dry-run
 python3 scripts/scenic_train_chatlm_sft.py --mode contrastive --dry-run
+python3 contrastive_sft.py --dry-run
 python3 -m pytest
 ```
 
@@ -110,6 +111,7 @@ Run training:
 ```bash
 python3 scripts/scenic_train_chatlm_sft.py --mode regular --epochs 3
 python3 scripts/scenic_train_chatlm_sft.py --mode contrastive --epochs 3 --alignment-weight 0.1 --margin 0.5
+python3 contrastive_sft.py --epochs 3 --alignment-weight 0.1 --margin 0.5
 ```
 
 On a multi-GPU NVIDIA machine, launch with `torchrun`. `--batch-size` is per GPU, so this example has a global batch of `16 * 8 = 128` before gradient accumulation:
@@ -129,6 +131,21 @@ Contrastive triplet SFT uses the same launcher:
 ```bash
 torchrun --standalone --nproc_per_node=8 scripts/scenic_train_chatlm_sft.py \
   --mode contrastive \
+  --epochs 3 \
+  --bf16 \
+  --batch-size 8 \
+  --gradient-accumulation-steps 1 \
+  --alignment-weight 0.1 \
+  --margin 0.5 \
+  --num-workers 4
+```
+
+Or use the dedicated contrastive-only file:
+
+```bash
+torchrun --standalone --nproc_per_node=8 contrastive_sft.py \
+  --model models/ChatLM-mini-Chinese-local \
+  --local-files-only \
   --epochs 3 \
   --bf16 \
   --batch-size 8 \
@@ -165,4 +182,4 @@ Single-process `python scripts/scenic_train_chatlm_sft.py ...` uses one GPU. Use
 
 For H20 speed, prefer `--bf16`. The trainer loads model weights in bfloat16 and pads batches to multiples of 8 when bf16/fp16 is enabled, matching the faster path used by the Encoder-Decoder training scripts.
 
-The model path, dataset paths, and output directories can also be changed directly at the top of `scripts/scenic_train_chatlm_sft.py`.
+The model path, dataset paths, and output directories can also be changed directly at the top of `scripts/scenic_train_chatlm_sft.py` or the contrastive-only `contrastive_sft.py`.
