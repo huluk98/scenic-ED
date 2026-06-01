@@ -245,7 +245,7 @@ def unwrap_model(model: Any) -> Any:
 
 def model_for_save(model: Any) -> Any:
     model = unwrap_model(model)
-    if hasattr(model, "base_model"):
+    if getattr(model, "_is_scenic_triplet_sft_wrapper", False):
         return model.base_model
     return model
 
@@ -487,6 +487,7 @@ class TripletSFTModule:
         class _TripletSFTModule(torch.nn.Module):
             def __init__(self, wrapped_model: Any) -> None:
                 super().__init__()
+                self._is_scenic_triplet_sft_wrapper = True
                 self.base_model = wrapped_model
 
             def forward(
