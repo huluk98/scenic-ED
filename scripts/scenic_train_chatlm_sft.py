@@ -368,6 +368,26 @@ def remove_token_type_ids(encoded: Any) -> Any:
     return encoded
 
 
+def pad_source_batch(encoded: dict[str, Any], target_length: int) -> dict[str, Any]:
+    import torch.nn.functional as functional
+
+    padded: dict[str, Any] = {}
+    for key, value in encoded.items():
+        if hasattr(value, "dim") and value.dim() == 2 and value.size(1) < target_length:
+            value = functional.pad(value, (0, target_length - value.size(1)), value=0)
+        padded[key] = value
+    return padded
+
+
+def combine_source_batches(first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any]:
+    import torch
+
+    target_length = max(first["input_ids"].size(1), second["input_ids"].size(1))
+    first = pad_source_batch(first, target_length)
+    second = pad_source_batch(second, target_length)
+    return {key: torch.cat([first[key], second[key]], dim=0) for key in first.keys() & second.keys()}
+
+
 def make_regular_collate(tokenizer: Any, config: RegularSFTConfig) -> Callable[[list[dict[str, str]]], dict[str, Any]]:
     def collate(batch: list[dict[str, str]]) -> dict[str, Any]:
         sources = [item["prompt"] for item in batch]
@@ -499,11 +519,13 @@ class TripletSFTModule:
                 margin: float,
                 alignment_weight: float,
             ) -> tuple[Any, Any, Any]:
+                import torch
                 import torch.nn.functional as functional
 
-                anchor_outputs = self.base_model(**anchor, labels=labels, return_dict=True)
-                positive_outputs = self.base_model(**positive, labels=labels, return_dict=True)
-                gen_loss = 0.5 * (anchor_outputs.loss + positive_outputs.loss)
+                generation_inputs = combine_source_batches(anchor, positive)
+                generation_labels = torch.cat([labels, labels], dim=0)
+                generation_outputs = self.base_model(**generation_inputs, labels=generation_labels, return_dict=True)
+                gen_loss = generation_outputs.loss
 
                 encoder = self.base_model.get_encoder()
                 negative_outputs = encoder(
@@ -511,8 +533,14 @@ class TripletSFTModule:
                     attention_mask=negative.get("attention_mask"),
                     return_dict=True,
                 )
-                anchor_rep = mean_pool_encoder(anchor_outputs.encoder_last_hidden_state, anchor["attention_mask"])
-                positive_rep = mean_pool_encoder(positive_outputs.encoder_last_hidden_state, positive["attention_mask"])
+                batch_size = labels.size(0)
+                anchor_hidden = generation_outputs.encoder_last_hidden_state[:batch_size]
+                positive_hidden = generation_outputs.encoder_last_hidden_state[batch_size:]
+                anchor_attention_mask = generation_inputs["attention_mask"][:batch_size]
+                positive_attention_mask = generation_inputs["attention_mask"][batch_size:]
+
+                anchor_rep = mean_pool_encoder(anchor_hidden, anchor_attention_mask)
+                positive_rep = mean_pool_encoder(positive_hidden, positive_attention_mask)
                 negative_rep = mean_pool_encoder(negative_outputs.last_hidden_state, negative["attention_mask"])
 
                 positive_distance = 1.0 - (anchor_rep * positive_rep).sum(dim=-1)
