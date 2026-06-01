@@ -57,7 +57,9 @@ def test_contrastive_collate_removes_token_type_ids() -> None:
         ]
     )
 
-    for key in ("anchor", "positive", "negative"):
+    for key in ("generation", "negative"):
         assert "token_type_ids" not in batch[key]
         assert set(batch[key]) == {"input_ids", "attention_mask"}
+    assert batch["generation"]["input_ids"].shape[0] == 2
+    assert batch["negative"]["input_ids"].shape[0] == 1
     assert "labels" in batch

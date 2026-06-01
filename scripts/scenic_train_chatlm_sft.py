@@ -417,26 +417,6 @@ def remove_token_type_ids(encoded: Any) -> Any:
     return encoded
 
 
-def pad_source_batch(encoded: dict[str, Any], target_length: int) -> dict[str, Any]:
-    import torch.nn.functional as functional
-
-    padded: dict[str, Any] = {}
-    for key, value in encoded.items():
-        if hasattr(value, "dim") and value.dim() == 2 and value.size(1) < target_length:
-            value = functional.pad(value, (0, target_length - value.size(1)), value=0)
-        padded[key] = value
-    return padded
-
-
-def combine_source_batches(first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any]:
-    import torch
-
-    target_length = max(first["input_ids"].size(1), second["input_ids"].size(1))
-    first = pad_source_batch(first, target_length)
-    second = pad_source_batch(second, target_length)
-    return {key: torch.cat([first[key], second[key]], dim=0) for key in first.keys() & second.keys()}
-
-
 def make_regular_collate(tokenizer: Any, config: RegularSFTConfig) -> Callable[[list[dict[str, str]]], dict[str, Any]]:
     def collate(batch: list[dict[str, str]]) -> dict[str, Any]:
         sources = [item["prompt"] for item in batch]
@@ -474,11 +454,12 @@ def make_contrastive_collate(
         )
 
     def collate(batch: list[dict[str, str]]) -> dict[str, Any]:
+        anchors = [item["anchor"] for item in batch]
+        positives = [item["positive"] for item in batch]
         labels = tokenize_targets(tokenizer, [item["response"] for item in batch], config.max_target_length)
         labels = mask_pad_tokens(labels, tokenizer.pad_token_id)
         return {
-            "anchor": encode_sources([item["anchor"] for item in batch]),
-            "positive": encode_sources([item["positive"] for item in batch]),
+            "generation": encode_sources(anchors + positives),
             "negative": encode_sources([item["negative"] for item in batch]),
             "labels": labels,
         }
@@ -561,8 +542,7 @@ class TripletSFTModule:
 
             def forward(
                 self,
-                anchor: dict[str, Any],
-                positive: dict[str, Any],
+                generation: dict[str, Any],
                 negative: dict[str, Any],
                 labels: Any,
                 margin: float,
@@ -571,9 +551,8 @@ class TripletSFTModule:
                 import torch
                 import torch.nn.functional as functional
 
-                generation_inputs = combine_source_batches(anchor, positive)
                 generation_labels = torch.cat([labels, labels], dim=0)
-                generation_outputs = self.base_model(**generation_inputs, labels=generation_labels, return_dict=True)
+                generation_outputs = self.base_model(**generation, labels=generation_labels, return_dict=True)
                 gen_loss = generation_outputs.loss
 
                 encoder = self.base_model.get_encoder()
@@ -585,8 +564,8 @@ class TripletSFTModule:
                 batch_size = labels.size(0)
                 anchor_hidden = generation_outputs.encoder_last_hidden_state[:batch_size]
                 positive_hidden = generation_outputs.encoder_last_hidden_state[batch_size:]
-                anchor_attention_mask = generation_inputs["attention_mask"][:batch_size]
-                positive_attention_mask = generation_inputs["attention_mask"][batch_size:]
+                anchor_attention_mask = generation["attention_mask"][:batch_size]
+                positive_attention_mask = generation["attention_mask"][batch_size:]
 
                 anchor_rep = mean_pool_encoder(anchor_hidden, anchor_attention_mask)
                 positive_rep = mean_pool_encoder(positive_hidden, positive_attention_mask)
@@ -752,15 +731,13 @@ def train_contrastive_triplet_sft(config: ContrastiveSFTConfig | None = None) ->
         running_gen = 0.0
         running_align = 0.0
         for batch_index, batch in enumerate(progress, start=1):
-            anchor = move_batch_to_device(batch["anchor"], device)
-            positive = move_batch_to_device(batch["positive"], device)
+            generation = move_batch_to_device(batch["generation"], device)
             negative = move_batch_to_device(batch["negative"], device)
             labels = batch["labels"].to(device)
 
             with autocast_context(config, device):
                 loss, gen_loss, align_loss = model(
-                    anchor=anchor,
-                    positive=positive,
+                    generation=generation,
                     negative=negative,
                     labels=labels,
                     margin=config.margin,

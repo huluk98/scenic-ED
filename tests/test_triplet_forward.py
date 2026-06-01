@@ -52,13 +52,9 @@ def test_triplet_forward_combines_anchor_and_positive_generation_pass() -> None:
     labels = torch.ones(2, 4, dtype=torch.long)
 
     loss, gen_loss, align_loss = model(
-        anchor={
-            "input_ids": torch.ones(2, 3, dtype=torch.long),
-            "attention_mask": torch.ones(2, 3, dtype=torch.long),
-        },
-        positive={
-            "input_ids": torch.ones(2, 5, dtype=torch.long),
-            "attention_mask": torch.ones(2, 5, dtype=torch.long),
+        generation={
+            "input_ids": torch.ones(4, 5, dtype=torch.long),
+            "attention_mask": torch.ones(4, 5, dtype=torch.long),
         },
         negative={
             "input_ids": torch.ones(2, 4, dtype=torch.long),
