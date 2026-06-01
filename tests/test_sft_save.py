@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+import torch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -9,7 +13,7 @@ SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from scenic_train_chatlm_sft import TripletSFTModule, model_for_save
+from scenic_train_chatlm_sft import TripletSFTModule, model_for_save, sanitize_config_for_json
 
 
 class FakeSeq2SeqModel:
@@ -28,3 +32,18 @@ def test_model_for_save_unwraps_only_scenic_triplet_wrapper() -> None:
     wrapped = TripletSFTModule(model).module
 
     assert model_for_save(wrapped) is model
+
+
+def test_sanitize_config_for_json_converts_torch_dtypes() -> None:
+    config = SimpleNamespace(
+        torch_dtype=torch.bfloat16,
+        nested={"dtype": torch.float16},
+        dtypes=[torch.float32],
+    )
+
+    sanitize_config_for_json(config)
+
+    assert config.torch_dtype == "bfloat16"
+    assert config.nested == {"dtype": "float16"}
+    assert config.dtypes == ["float32"]
+    json.dumps(vars(config))

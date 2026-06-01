@@ -269,6 +269,36 @@ def model_for_save(model: Any) -> Any:
     return model
 
 
+def json_safe_value(value: Any) -> Any:
+    import torch
+
+    if isinstance(value, torch.dtype):
+        return str(value).replace("torch.", "")
+    if isinstance(value, dict):
+        return {key: json_safe_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_safe_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(json_safe_value(item) for item in value)
+    return value
+
+
+def sanitize_config_for_json(config: Any) -> None:
+    if config is None:
+        return
+    for key, value in list(vars(config).items()):
+        safe_value = json_safe_value(value)
+        if safe_value is not value:
+            setattr(config, key, safe_value)
+
+
+def sanitize_model_for_save(model: Any) -> Any:
+    model = model_for_save(model)
+    sanitize_config_for_json(getattr(model, "config", None))
+    sanitize_config_for_json(getattr(model, "generation_config", None))
+    return model
+
+
 def load_chatlm_stack(config: RegularSFTConfig, state: DistributedState) -> tuple[Any, Any, Any]:
     if config.local_files_only:
         force_huggingface_offline()
@@ -516,7 +546,7 @@ def autocast_context(config: RegularSFTConfig, device: Any) -> Any:
 def save_model(tokenizer: Any, model: Any, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     tokenizer.save_pretrained(output_dir)
-    model_for_save(model).save_pretrained(output_dir)
+    sanitize_model_for_save(model).save_pretrained(output_dir)
 
 
 class TripletSFTModule:
