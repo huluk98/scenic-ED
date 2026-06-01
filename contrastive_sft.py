@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -21,12 +22,11 @@ from scenic_train_chatlm_sft import (  # noqa: E402
 # =====================================================
 # CHANGE THESE PATHS DIRECTLY
 # =====================================================
-MODEL_PATH = "charent/ChatLM-mini-Chinese"
+MODEL_PATH = str(PROJECT_ROOT / "models" / "ChatLM-mini-Chinese-local")
 # Examples:
-# MODEL_PATH = "charent/ChatLM-mini-Chinese"
-# MODEL_PATH = "models/ChatLM-mini-Chinese"
-# MODEL_PATH = "models/ChatLM-mini-Chinese-local"
+# MODEL_PATH = str(PROJECT_ROOT / "models" / "ChatLM-mini-Chinese-local")
 # MODEL_PATH = "/nvme1/home/luke/models/chatlm"
+# MODEL_PATH = "charent/ChatLM-mini-Chinese"
 
 TRAIN_JSON = str(PROJECT_ROOT / "data" / "SCENIC_full_anchor_positive_negative.json")
 # Example:
@@ -37,8 +37,8 @@ OUTPUT_DIR = str(PROJECT_ROOT / "models" / "chatlm_scenic_triplet_sft")
 # OUTPUT_DIR = "/nvme1/home/luke/Encoder-Chinese-SLM/sft_contrastive"
 
 EPOCHS = 3
-BATCH_SIZE = 4
-GRADIENT_ACCUMULATION_STEPS = 4
+BATCH_SIZE = 8
+GRADIENT_ACCUMULATION_STEPS = 1
 LEARNING_RATE = 5e-5
 WEIGHT_DECAY = 0.01
 WARMUP_RATIO = 0.03
@@ -48,11 +48,11 @@ MAX_GRAD_NORM = 1.0
 SEED = 42
 MAX_EXAMPLES = None
 CACHE_DIR = None
-LOCAL_FILES_ONLY = False
+LOCAL_FILES_ONLY = True
 DEVICE = "auto"
 FP16 = False
-BF16 = False
-NUM_WORKERS = 0
+BF16 = True
+NUM_WORKERS = 4
 LOG_EVERY = 20
 SAVE_EVERY_STEPS = 0
 
@@ -131,8 +131,26 @@ def contrastive_config_from_args(args: argparse.Namespace) -> ContrastiveSFTConf
     )
 
 
+def print_run_config(args: argparse.Namespace) -> None:
+    if int(os.environ.get("RANK", "0")) != 0:
+        return
+    print("Contrastive SFT run config:")
+    print(f"  model: {args.model}")
+    print(f"  train_json: {args.train_json}")
+    print(f"  output_dir: {args.output_dir}")
+    print(f"  epochs: {args.epochs}")
+    print(f"  batch_size_per_gpu: {args.batch_size}")
+    print(f"  gradient_accumulation_steps: {args.gradient_accumulation_steps}")
+    print(f"  bf16: {args.bf16}")
+    print(f"  local_files_only: {args.local_files_only}")
+    print(f"  alignment_weight: {args.alignment_weight}")
+    print(f"  margin: {args.margin}")
+    print(f"  negative_field: {args.negative_field}")
+
+
 def main() -> None:
     args = parse_args()
+    print_run_config(args)
     train_json = Path(args.train_json).expanduser()
 
     if args.dry_run:

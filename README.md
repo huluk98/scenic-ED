@@ -143,19 +143,10 @@ torchrun --standalone --nproc_per_node=8 scripts/scenic_train_chatlm_sft.py \
 Or use the dedicated contrastive-only file:
 
 ```bash
-torchrun --standalone --nproc_per_node=8 contrastive_sft.py \
-  --model models/ChatLM-mini-Chinese-local \
-  --local-files-only \
-  --epochs 3 \
-  --bf16 \
-  --batch-size 8 \
-  --gradient-accumulation-steps 1 \
-  --alignment-weight 0.1 \
-  --margin 0.5 \
-  --num-workers 4
+torchrun --nproc_per_node=8 contrastive_sft.py
 ```
 
-For `contrastive_sft.py`, you can also paste your model, dataset, and output paths directly into the `MODEL_PATH`, `TRAIN_JSON`, and `OUTPUT_DIR` variables at the top of the file and run it without those path flags.
+For `contrastive_sft.py`, the model, dataset, and output paths are provided directly in the `MODEL_PATH`, `TRAIN_JSON`, and `OUTPUT_DIR` variables at the top of the file. By default it expects the local ChatLM model at `models/ChatLM-mini-Chinese-local`, trains from `data/SCENIC_full_anchor_positive_negative.json`, writes to `models/chatlm_scenic_triplet_sft`, uses bf16, and loads local files only.
 
 For a quick 8-GPU smoke test:
 
