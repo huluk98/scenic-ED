@@ -624,6 +624,36 @@ def save_final_rank0_after_training(
     release_cuda_memory()
 
 
+def pair_balanced_generation_loss(outputs: Any, labels: Any, batch_size: int) -> Any:
+    logits = getattr(outputs, "logits", None)
+    if logits is None:
+        loss = getattr(outputs, "loss", None)
+        if loss is None:
+            raise RuntimeError("Model output must include either logits or loss for triplet SFT generation loss.")
+        return loss
+
+    import torch.nn.functional as functional
+
+    if logits.size(1) != labels.size(1):
+        common_length = min(logits.size(1), labels.size(1))
+        logits = logits[:, :common_length, :]
+        labels = labels[:, :common_length]
+
+    token_losses = functional.cross_entropy(
+        logits.reshape(-1, logits.size(-1)),
+        labels.reshape(-1),
+        ignore_index=-100,
+        reduction="none",
+    ).reshape(labels.shape)
+    token_counts = labels.ne(-100).sum(dim=1).clamp(min=1).to(token_losses.dtype)
+    per_example_losses = token_losses.sum(dim=1) / token_counts
+
+    if per_example_losses.size(0) != batch_size * 2:
+        return per_example_losses.mean()
+    paired_losses = 0.5 * (per_example_losses[:batch_size] + per_example_losses[batch_size:])
+    return paired_losses.mean()
+
+
 class TripletSFTModule:
     def __init__(self, base_model: Any) -> None:
         import torch
@@ -633,6 +663,22 @@ class TripletSFTModule:
                 super().__init__()
                 self._is_scenic_triplet_sft_wrapper = True
                 self.base_model = wrapped_model
+
+            def _encoder(self) -> Any:
+                if not hasattr(self.base_model, "get_encoder"):
+                    raise RuntimeError("Triplet SFT currently requires an encoder-decoder model with get_encoder().")
+                encoder = self.base_model.get_encoder()
+                if encoder is None:
+                    raise RuntimeError("Triplet SFT could not obtain an encoder from the base model.")
+                return encoder
+
+            def _representations(self, encoded_inputs: dict[str, Any]) -> Any:
+                encoder_outputs = self._encoder()(
+                    input_ids=encoded_inputs["input_ids"],
+                    attention_mask=encoded_inputs.get("attention_mask"),
+                    return_dict=True,
+                )
+                return mean_pool_encoder(encoder_outputs.last_hidden_state, encoded_inputs["attention_mask"])
 
             def forward(
                 self,
@@ -645,25 +691,24 @@ class TripletSFTModule:
                 import torch
                 import torch.nn.functional as functional
 
+                batch_size = labels.size(0)
                 generation_labels = torch.cat([labels, labels], dim=0)
                 generation_outputs = self.base_model(**generation, labels=generation_labels, return_dict=True)
-                gen_loss = generation_outputs.loss
+                gen_loss = pair_balanced_generation_loss(generation_outputs, generation_labels, batch_size)
 
-                encoder = self.base_model.get_encoder()
-                negative_outputs = encoder(
-                    input_ids=negative["input_ids"],
-                    attention_mask=negative.get("attention_mask"),
-                    return_dict=True,
-                )
-                batch_size = labels.size(0)
-                anchor_hidden = generation_outputs.encoder_last_hidden_state[:batch_size]
-                positive_hidden = generation_outputs.encoder_last_hidden_state[batch_size:]
-                anchor_attention_mask = generation["attention_mask"][:batch_size]
-                positive_attention_mask = generation["attention_mask"][batch_size:]
-
-                anchor_rep = mean_pool_encoder(anchor_hidden, anchor_attention_mask)
-                positive_rep = mean_pool_encoder(positive_hidden, positive_attention_mask)
-                negative_rep = mean_pool_encoder(negative_outputs.last_hidden_state, negative["attention_mask"])
+                encoder_hidden = getattr(generation_outputs, "encoder_last_hidden_state", None)
+                if encoder_hidden is None:
+                    generation_reps = self._representations(generation)
+                    anchor_rep = generation_reps[:batch_size]
+                    positive_rep = generation_reps[batch_size:]
+                else:
+                    anchor_hidden = encoder_hidden[:batch_size]
+                    positive_hidden = encoder_hidden[batch_size:]
+                    anchor_attention_mask = generation["attention_mask"][:batch_size]
+                    positive_attention_mask = generation["attention_mask"][batch_size:]
+                    anchor_rep = mean_pool_encoder(anchor_hidden, anchor_attention_mask)
+                    positive_rep = mean_pool_encoder(positive_hidden, positive_attention_mask)
+                negative_rep = self._representations(negative)
 
                 positive_distance = 1.0 - (anchor_rep * positive_rep).sum(dim=-1)
                 negative_distance = 1.0 - (anchor_rep * negative_rep).sum(dim=-1)

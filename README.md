@@ -143,10 +143,12 @@ torchrun --standalone --nproc_per_node=8 scripts/scenic_train_chatlm_sft.py \
 Or use the dedicated contrastive-only file:
 
 ```bash
-torchrun --nproc_per_node=8 contrastive_sft.py
+bash scripts/run_contrastive_sft_8gpu.sh
 ```
 
 For `contrastive_sft.py`, the model, dataset, and output paths are provided directly in the `MODEL_PATH`, `TRAIN_JSON`, and `OUTPUT_DIR` variables at the top of the file. By default it expects the local ChatLM model at `models/ChatLM-mini-Chinese-local`, trains from `data/SCENIC_full_anchor_positive_negative.json`, writes to `models/chatlm_scenic_triplet_sft`, uses bf16, and loads local files only.
+
+The triplet objective is pair-balanced: for each tuple it averages the anchor and positive generation losses, then adds `alignment_weight * max(0, margin + d(anchor, positive) - d(anchor, negative))` using cosine distance over L2-normalized encoder representations.
 
 `contrastive_sft.py` also enables NCCL async error handling, uses a 10-minute DDP timeout, and cleans up the process group plus CUDA cache on normal exit, Ctrl-C, or termination. If a previous failed run already left Python ranks alive on the server, kill those stale processes once before relaunching:
 
