@@ -160,6 +160,12 @@ If `nvidia-smi` still shows old Python PIDs after that, terminate those PIDs dir
 
 The dedicated `contrastive_sft.py` saves only the final model by default. Per-epoch checkpoint saves can look like a hang because rank 0 is writing model files while the other ranks wait at a DDP synchronization point. To enable epoch checkpoints anyway, pass `--epoch-checkpoints`; to disable them in the shared trainer, pass `--no-epoch-checkpoints`.
 
+For the final save, all ranks now synchronize once, DDP is shut down, non-main ranks release GPU memory, and only rank 0 writes the model. The default final save moves the model to CPU first, so `nvidia-smi` may look mostly idle while the model is being written. If safetensors is slow on your filesystem, retry with:
+
+```bash
+torchrun --standalone --nproc_per_node=8 contrastive_sft.py --no-safe-serialization
+```
+
 For a quick 8-GPU smoke test:
 
 ```bash

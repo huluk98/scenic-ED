@@ -68,6 +68,8 @@ class RegularSFTConfig:
     log_every: int = 20
     save_every_steps: int = 0
     save_epoch_checkpoints: bool = True
+    final_save_on_cpu: bool = True
+    safe_serialization: bool = True
 
 
 @dataclass
@@ -570,10 +572,10 @@ def autocast_context(config: RegularSFTConfig, device: Any) -> Any:
     return nullcontext()
 
 
-def save_model(tokenizer: Any, model: Any, output_dir: Path) -> None:
+def save_model(tokenizer: Any, model: Any, output_dir: Path, safe_serialization: bool = True) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     tokenizer.save_pretrained(output_dir)
-    sanitize_model_for_save(model).save_pretrained(output_dir)
+    sanitize_model_for_save(model).save_pretrained(output_dir, safe_serialization=safe_serialization)
 
 
 def save_rank0_then_sync(
@@ -588,6 +590,38 @@ def save_rank0_then_sync(
         save_model(tokenizer, model, output_dir)
         rank0_print(state, f"Finished saving {label}.")
     sync_distributed(state)
+
+
+def save_final_rank0_after_training(
+    state: DistributedState,
+    tokenizer: Any,
+    model: Any,
+    output_dir: Path,
+    label: str,
+    save_on_cpu: bool,
+    safe_serialization: bool,
+) -> None:
+    rank0_print(state, f"Training finished; synchronizing ranks before saving {label}.")
+    sync_distributed(state)
+    cleanup_distributed(state)
+
+    if not state.is_main:
+        release_cuda_memory()
+        return
+
+    model_to_save = sanitize_model_for_save(model)
+    if save_on_cpu:
+        rank0_print(state, f"Moving {label} to CPU before saving...")
+        model_to_save.to("cpu")
+        release_cuda_memory()
+
+    rank0_print(state, f"Saving {label} to {output_dir}...")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    tokenizer.save_pretrained(output_dir)
+    rank0_print(state, f"Tokenizer saved for {label}; saving model weights...")
+    model_to_save.save_pretrained(output_dir, safe_serialization=safe_serialization)
+    rank0_print(state, f"Finished saving {label}.")
+    release_cuda_memory()
 
 
 class TripletSFTModule:
@@ -736,9 +770,15 @@ def train_regular_sft(config: RegularSFTConfig | None = None) -> Path:
             rank0_print(state, f"Finished regular epoch {epoch}; synchronizing ranks.")
             sync_distributed(state)
 
-    save_rank0_then_sync(state, tokenizer, model, config.output_dir, "regular final model")
-    cleanup_distributed(state)
-    release_cuda_memory()
+    save_final_rank0_after_training(
+        state,
+        tokenizer,
+        model,
+        config.output_dir,
+        "regular final model",
+        save_on_cpu=config.final_save_on_cpu,
+        safe_serialization=config.safe_serialization,
+    )
     return config.output_dir
 
 
@@ -861,9 +901,15 @@ def train_contrastive_triplet_sft(config: ContrastiveSFTConfig | None = None) ->
             rank0_print(state, f"Finished triplet epoch {epoch}; synchronizing ranks.")
             sync_distributed(state)
 
-    save_rank0_then_sync(state, tokenizer, model, config.output_dir, "triplet final model")
-    cleanup_distributed(state)
-    release_cuda_memory()
+    save_final_rank0_after_training(
+        state,
+        tokenizer,
+        model,
+        config.output_dir,
+        "triplet final model",
+        save_on_cpu=config.final_save_on_cpu,
+        safe_serialization=config.safe_serialization,
+    )
     return config.output_dir
 
 
@@ -911,6 +957,18 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Save checkpoint-epoch-N directories. Use --no-epoch-checkpoints to save only the final model.",
+    )
+    parser.add_argument(
+        "--final-save-on-cpu",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Move the final rank-0 model to CPU before save_pretrained to release GPU memory while saving.",
+    )
+    parser.add_argument(
+        "--safe-serialization",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use safetensors for the final model save. Use --no-safe-serialization to write pytorch_model.bin.",
     )
     parser.add_argument(
         "--ddp-timeout-minutes",
@@ -962,6 +1020,8 @@ def regular_config_from_args(args: argparse.Namespace) -> RegularSFTConfig:
         log_every=args.log_every,
         save_every_steps=args.save_every_steps,
         save_epoch_checkpoints=args.epoch_checkpoints,
+        final_save_on_cpu=args.final_save_on_cpu,
+        safe_serialization=args.safe_serialization,
     )
 
 
@@ -992,6 +1052,8 @@ def contrastive_config_from_args(args: argparse.Namespace) -> ContrastiveSFTConf
         log_every=args.log_every,
         save_every_steps=args.save_every_steps,
         save_epoch_checkpoints=args.epoch_checkpoints,
+        final_save_on_cpu=args.final_save_on_cpu,
+        safe_serialization=args.safe_serialization,
         alignment_weight=args.alignment_weight,
         margin=args.margin,
         negative_field=args.negative_field,
