@@ -208,6 +208,25 @@ def rank0_print(state: DistributedState, message: str) -> None:
         print(message, flush=True)
 
 
+def print_distributed_launch(state: DistributedState) -> None:
+    import torch
+
+    if not state.enabled:
+        rank0_print(state, "Distributed training disabled: using a single process.")
+        return
+
+    device_name = torch.cuda.get_device_name(state.local_rank)
+    print(
+        "DDP launch: "
+        f"rank={state.rank}/{state.world_size} "
+        f"local_rank={state.local_rank} "
+        f"cuda_device={torch.cuda.current_device()} "
+        f"gpu={device_name}",
+        flush=True,
+    )
+    sync_distributed(state)
+
+
 def force_huggingface_offline() -> None:
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -667,6 +686,7 @@ def train_contrastive_triplet_sft(config: ContrastiveSFTConfig | None = None) ->
         raise ValueError("Triplet margin should be in (0, 2) for cosine distance.")
 
     state = setup_distributed()
+    print_distributed_launch(state)
     seed_everything(config.seed)
     examples = load_contrastive_examples(config.train_json, negative_field=config.negative_field)
     if config.max_examples is not None:

@@ -55,6 +55,7 @@ BF16 = True
 NUM_WORKERS = 4
 LOG_EVERY = 20
 SAVE_EVERY_STEPS = 0
+EXPECTED_GPUS = 8
 
 # Triplet SFT objective controls.
 ALIGNMENT_WEIGHT = 0.1
@@ -97,6 +98,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alignment-weight", type=float, default=ALIGNMENT_WEIGHT)
     parser.add_argument("--margin", type=float, default=MARGIN)
     parser.add_argument("--negative-field", default=NEGATIVE_FIELD)
+    parser.add_argument("--expected-gpus", type=int, default=EXPECTED_GPUS)
+    parser.add_argument(
+        "--allow-single-gpu",
+        action="store_true",
+        help="Allow running without torchrun. By default this file expects 8 GPU torchrun training.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Validate and summarize data without loading the model.")
     return parser.parse_args()
 
@@ -143,14 +150,60 @@ def print_run_config(args: argparse.Namespace) -> None:
     print(f"  gradient_accumulation_steps: {args.gradient_accumulation_steps}")
     print(f"  bf16: {args.bf16}")
     print(f"  local_files_only: {args.local_files_only}")
+    print(f"  expected_gpus: {args.expected_gpus}")
     print(f"  alignment_weight: {args.alignment_weight}")
     print(f"  margin: {args.margin}")
     print(f"  negative_field: {args.negative_field}")
 
 
+def validate_gpu_launch(args: argparse.Namespace) -> None:
+    if args.dry_run or args.allow_single_gpu:
+        return
+
+    import torch
+
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", str(world_size)))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "<not set>")
+    cuda_available = torch.cuda.is_available()
+    cuda_count = torch.cuda.device_count() if cuda_available else 0
+
+    if rank == 0:
+        print("Torchrun/GPU launch check:")
+        print(f"  WORLD_SIZE: {world_size}")
+        print(f"  LOCAL_WORLD_SIZE: {local_world_size}")
+        print(f"  torch.cuda.is_available: {cuda_available}")
+        print(f"  torch.cuda.device_count: {cuda_count}")
+        print(f"  CUDA_VISIBLE_DEVICES: {visible_devices}")
+
+    if world_size <= 1:
+        raise RuntimeError(
+            "contrastive_sft.py is configured for multi-GPU training. "
+            "Launch with `torchrun --nproc_per_node=8 contrastive_sft.py`, "
+            "or pass `--allow-single-gpu` for a one-GPU/debug run."
+        )
+    if args.expected_gpus and world_size != args.expected_gpus:
+        raise RuntimeError(
+            f"Expected WORLD_SIZE={args.expected_gpus}, but torchrun started WORLD_SIZE={world_size}. "
+            f"Use `torchrun --nproc_per_node={args.expected_gpus} contrastive_sft.py`."
+        )
+    if not cuda_available:
+        raise RuntimeError("CUDA is not available, so NCCL/DDP cannot use the requested GPUs.")
+    if cuda_count < local_world_size:
+        raise RuntimeError(
+            f"Only {cuda_count} CUDA device(s) are visible, but LOCAL_WORLD_SIZE={local_world_size}. "
+            "Check CUDA_VISIBLE_DEVICES and nvidia-smi."
+        )
+    if local_rank >= cuda_count:
+        raise RuntimeError(f"LOCAL_RANK={local_rank} is out of range for {cuda_count} visible CUDA device(s).")
+
+
 def main() -> None:
     args = parse_args()
     print_run_config(args)
+    validate_gpu_launch(args)
     train_json = Path(args.train_json).expanduser()
 
     if args.dry_run:
