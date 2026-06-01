@@ -148,6 +148,16 @@ torchrun --nproc_per_node=8 contrastive_sft.py
 
 For `contrastive_sft.py`, the model, dataset, and output paths are provided directly in the `MODEL_PATH`, `TRAIN_JSON`, and `OUTPUT_DIR` variables at the top of the file. By default it expects the local ChatLM model at `models/ChatLM-mini-Chinese-local`, trains from `data/SCENIC_full_anchor_positive_negative.json`, writes to `models/chatlm_scenic_triplet_sft`, uses bf16, and loads local files only.
 
+`contrastive_sft.py` also enables NCCL async error handling, uses a 10-minute DDP timeout, and cleans up the process group plus CUDA cache on normal exit, Ctrl-C, or termination. If a previous failed run already left Python ranks alive on the server, kill those stale processes once before relaunching:
+
+```bash
+pkill -f "torchrun.*contrastive_sft.py"
+pkill -f "contrastive_sft.py"
+nvidia-smi
+```
+
+If `nvidia-smi` still shows old Python PIDs after that, terminate those PIDs directly with `kill -9 <pid>`. No Python cleanup hook can run after `kill -9` or a driver-level hard hang, but GPU memory is released when the owning process is gone.
+
 For a quick 8-GPU smoke test:
 
 ```bash

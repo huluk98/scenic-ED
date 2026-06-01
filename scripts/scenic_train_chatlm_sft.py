@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import math
 import os
 import random
+import signal
 from contextlib import nullcontext
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable
 
@@ -25,6 +28,7 @@ PROMPT_FIELDS = ("prompt", "instruction", "question", "input", "anchor", "x")
 RESPONSE_FIELDS = ("response", "output", "answer", "completion", "target", "y")
 POSITIVE_FIELDS = ("positive", "pos", "x_positive", "x_plus", "chosen")
 NEGATIVE_FIELDS = ("negative", "neg", "x_negative", "x_minus", "rejected")
+DEFAULT_DDP_TIMEOUT_MINUTES = 10
 
 
 @dataclass
@@ -180,10 +184,13 @@ def setup_distributed() -> DistributedState:
     if not torch.cuda.is_available():
         raise RuntimeError("Distributed training requires CUDA. Use a single-process CPU/MPS run instead.")
 
+    os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
+    os.environ.setdefault("NCCL_ASYNC_ERROR_HANDLING", "1")
+    timeout_minutes = int(os.environ.get("SCENIC_DDP_TIMEOUT_MINUTES", "10"))
     local_rank = int(os.environ["LOCAL_RANK"])
     rank = int(os.environ["RANK"])
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl")
+    dist.init_process_group(backend="nccl", timeout=timedelta(minutes=timeout_minutes))
     return DistributedState(enabled=True, rank=rank, local_rank=local_rank, world_size=world_size)
 
 
@@ -192,7 +199,43 @@ def cleanup_distributed(state: DistributedState) -> None:
         return
     import torch.distributed as dist
 
-    dist.destroy_process_group()
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def release_cuda_memory() -> None:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception:
+        pass
+
+
+def cleanup_active_distributed() -> None:
+    try:
+        import torch.distributed as dist
+
+        if dist.is_available() and dist.is_initialized():
+            dist.destroy_process_group()
+    except Exception:
+        pass
+    release_cuda_memory()
+
+
+def install_signal_handlers() -> None:
+    def handle_signal(signum: int, _frame: object) -> None:
+        if int(os.environ.get("RANK", "0")) == 0:
+            print(f"Received signal {signum}; cleaning up distributed/CUDA state.", flush=True)
+        cleanup_active_distributed()
+        raise SystemExit(128 + signum)
+
+    for signal_name in ("SIGINT", "SIGTERM", "SIGHUP"):
+        signum = getattr(signal, signal_name, None)
+        if signum is not None:
+            signal.signal(signum, handle_signal)
 
 
 def sync_distributed(state: DistributedState) -> None:
@@ -665,6 +708,7 @@ def train_regular_sft(config: RegularSFTConfig | None = None) -> Path:
         save_model(tokenizer, model, config.output_dir)
     sync_distributed(state)
     cleanup_distributed(state)
+    release_cuda_memory()
     return config.output_dir
 
 
@@ -776,6 +820,7 @@ def train_contrastive_triplet_sft(config: ContrastiveSFTConfig | None = None) ->
         save_model(tokenizer, model, config.output_dir)
     sync_distributed(state)
     cleanup_distributed(state)
+    release_cuda_memory()
     return config.output_dir
 
 
@@ -818,6 +863,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--save-every-steps", type=int, default=0)
+    parser.add_argument(
+        "--ddp-timeout-minutes",
+        type=int,
+        default=DEFAULT_DDP_TIMEOUT_MINUTES,
+        help="NCCL/DDP timeout. A failed rank should abort instead of hanging forever.",
+    )
     parser.add_argument("--alignment-weight", type=float, default=0.1)
     parser.add_argument("--margin", type=float, default=0.5)
     parser.add_argument(
@@ -827,6 +878,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dry-run", action="store_true", help="Validate and summarize data without loading the model.")
     return parser.parse_args()
+
+
+def configure_runtime(args: argparse.Namespace) -> None:
+    os.environ["SCENIC_DDP_TIMEOUT_MINUTES"] = str(args.ddp_timeout_minutes)
+    os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
+    os.environ.setdefault("NCCL_ASYNC_ERROR_HANDLING", "1")
 
 
 def regular_config_from_args(args: argparse.Namespace) -> RegularSFTConfig:
@@ -892,17 +949,23 @@ def contrastive_config_from_args(args: argparse.Namespace) -> ContrastiveSFTConf
 
 def main() -> None:
     args = parse_args()
-    if args.dry_run:
-        default_path = REGULAR_TRAIN_JSON if args.mode == "regular" else CONTRASTIVE_TRAIN_JSON
-        train_path = Path(args.train_json).expanduser() if args.train_json else default_path
-        print_dataset_summary(args.mode, train_path, args.negative_field)
-        return
+    configure_runtime(args)
+    install_signal_handlers()
+    atexit.register(cleanup_active_distributed)
+    try:
+        if args.dry_run:
+            default_path = REGULAR_TRAIN_JSON if args.mode == "regular" else CONTRASTIVE_TRAIN_JSON
+            train_path = Path(args.train_json).expanduser() if args.train_json else default_path
+            print_dataset_summary(args.mode, train_path, args.negative_field)
+            return
 
-    if args.mode == "regular":
-        output_dir = train_regular_sft(regular_config_from_args(args))
-    else:
-        output_dir = train_contrastive_triplet_sft(contrastive_config_from_args(args))
-    print(f"saved model to {output_dir}")
+        if args.mode == "regular":
+            output_dir = train_regular_sft(regular_config_from_args(args))
+        else:
+            output_dir = train_contrastive_triplet_sft(contrastive_config_from_args(args))
+        print(f"saved model to {output_dir}")
+    finally:
+        cleanup_active_distributed()
 
 
 if __name__ == "__main__":

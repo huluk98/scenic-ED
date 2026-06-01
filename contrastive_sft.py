@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -56,6 +58,7 @@ NUM_WORKERS = 4
 LOG_EVERY = 20
 SAVE_EVERY_STEPS = 0
 EXPECTED_GPUS = 8
+DDP_TIMEOUT_MINUTES = 10
 
 # Triplet SFT objective controls.
 ALIGNMENT_WEIGHT = 0.1
@@ -99,6 +102,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--margin", type=float, default=MARGIN)
     parser.add_argument("--negative-field", default=NEGATIVE_FIELD)
     parser.add_argument("--expected-gpus", type=int, default=EXPECTED_GPUS)
+    parser.add_argument(
+        "--ddp-timeout-minutes",
+        type=int,
+        default=DDP_TIMEOUT_MINUTES,
+        help="NCCL/DDP timeout. A failed rank should abort instead of hanging forever.",
+    )
     parser.add_argument(
         "--allow-single-gpu",
         action="store_true",
@@ -151,9 +160,48 @@ def print_run_config(args: argparse.Namespace) -> None:
     print(f"  bf16: {args.bf16}")
     print(f"  local_files_only: {args.local_files_only}")
     print(f"  expected_gpus: {args.expected_gpus}")
+    print(f"  ddp_timeout_minutes: {args.ddp_timeout_minutes}")
     print(f"  alignment_weight: {args.alignment_weight}")
     print(f"  margin: {args.margin}")
     print(f"  negative_field: {args.negative_field}")
+
+
+def configure_runtime(args: argparse.Namespace) -> None:
+    os.environ["SCENIC_DDP_TIMEOUT_MINUTES"] = str(args.ddp_timeout_minutes)
+    os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
+    os.environ.setdefault("NCCL_ASYNC_ERROR_HANDLING", "1")
+
+
+def cleanup_runtime() -> None:
+    try:
+        import torch.distributed as dist
+
+        if dist.is_available() and dist.is_initialized():
+            dist.destroy_process_group()
+    except Exception:
+        pass
+
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception:
+        pass
+
+
+def install_signal_handlers() -> None:
+    def handle_signal(signum: int, _frame: object) -> None:
+        if int(os.environ.get("RANK", "0")) == 0:
+            print(f"Received signal {signum}; cleaning up distributed/CUDA state.", flush=True)
+        cleanup_runtime()
+        raise SystemExit(128 + signum)
+
+    for signal_name in ("SIGINT", "SIGTERM", "SIGHUP"):
+        signum = getattr(signal, signal_name, None)
+        if signum is not None:
+            signal.signal(signum, handle_signal)
 
 
 def validate_gpu_launch(args: argparse.Namespace) -> None:
@@ -202,6 +250,9 @@ def validate_gpu_launch(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
+    configure_runtime(args)
+    install_signal_handlers()
+    atexit.register(cleanup_runtime)
     print_run_config(args)
     validate_gpu_launch(args)
     train_json = Path(args.train_json).expanduser()
@@ -210,8 +261,11 @@ def main() -> None:
         print_dataset_summary("contrastive", train_json, args.negative_field)
         return
 
-    output_dir = train_contrastive_triplet_sft(contrastive_config_from_args(args))
-    print(f"saved contrastive model to {output_dir}")
+    try:
+        output_dir = train_contrastive_triplet_sft(contrastive_config_from_args(args))
+        print(f"saved contrastive model to {output_dir}")
+    finally:
+        cleanup_runtime()
 
 
 if __name__ == "__main__":
