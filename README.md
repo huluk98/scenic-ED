@@ -196,3 +196,33 @@ Single-process `python scripts/scenic_train_chatlm_sft.py ...` uses one GPU. Use
 For H20 speed, prefer `--bf16`. The trainer loads model weights in bfloat16 and pads batches to multiples of 8 when bf16/fp16 is enabled, matching the faster path used by the Encoder-Decoder training scripts.
 
 The model path, dataset paths, and output directories can also be changed directly at the top of `scripts/scenic_train_chatlm_sft.py` or the contrastive-only `contrastive_sft.py`.
+
+## 50% Prune And Evaluate
+
+After regular SFT or contrastive SFT finishes, run a 50% prune/eval pass with one model path:
+
+```bash
+bash scripts/run_prune_eval_50.sh models/chatlm_scenic_triplet_sft
+```
+
+The launcher writes one combined JSON report containing the original pre-prune EM@1/EM@5, the pruned EM@1/EM@5, benchmark results, full training-set results, model identity metadata, pruning stats, and predictions. By default it uses magnitude pruning and auto-detects available NVIDIA GPUs for evaluation.
+
+Choose another 50% pruning method with `METHOD`:
+
+```bash
+METHOD=wanda bash scripts/run_prune_eval_50.sh models/chatlm_scenic_triplet_sft
+METHOD=gradient bash scripts/run_prune_eval_50.sh models/chatlm_scenic_triplet_sft
+METHOD=nvidia bash scripts/run_prune_eval_50.sh models/chatlm_scenic_triplet_sft
+```
+
+Override outputs or limit rows for a smoke test:
+
+```bash
+bash scripts/run_prune_eval_50.sh models/chatlm_scenic_triplet_sft \
+  --output-json prune_eval_outputs/triplet_50/prune_eval_report.json \
+  --pruned-output-dir prune_eval_outputs/triplet_50/pruned_model \
+  --max-train-examples 128 \
+  --max-benchmark-examples 50
+```
+
+`scripts/scenic_prune_eval.py` supports `magnitude`, `gradient`, `wanda`, and NVIDIA `2:4` pruning. The report stores `accuracy` as exact-match@1 so you can verify the checkpoint you passed in before comparing the pruned model.
