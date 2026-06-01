@@ -17,12 +17,19 @@ from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
 
 # ============================================================
-# CONFIG PATHS
+# CONFIG PATHS - EDIT THESE DIRECTLY
 # ============================================================
-MODEL_PATH = "./sft"
+MODEL_PATH = "./models/chatlm_scenic_triplet_sft"
+# Examples:
+# MODEL_PATH = "./sft"
+# MODEL_PATH = "./models/chatlm_scenic_triplet_sft"
+# MODEL_PATH = "/nvme1/home/luke/Encoder-Chinese-SLM/sft_contrastive"
 
-JSON1_PATH = "/nvme1/home/luke/Encoder-Chinese-SLM/data/scenic/SCENIC_full_training_dataset.json"
-JSON2_PATH = "/nvme1/home/luke/Encoder-Chinese-SLM/data/scenic/YOUR_SECOND_EVAL_FILE.json"
+JSON1_PATH = "./data/SCENIC_full_training_dataset.json"
+JSON2_PATH = None
+# Examples:
+# JSON1_PATH = "/nvme1/home/luke/Encoder-Chinese-SLM/data/scenic/SCENIC_full_training_dataset.json"
+# JSON2_PATH = "/nvme1/home/luke/Encoder-Chinese-SLM/data/scenic/YOUR_SECOND_EVAL_FILE.json"
 
 OUTPUT_DIR = "./eval_outputs"
 
@@ -30,6 +37,10 @@ BATCH_SIZE = 8
 MAX_INPUT_LEN = 256
 MAX_NEW_TOKENS = 128
 IGNORE_SPACES = False
+LOCAL_FILES_ONLY = True
+TRUST_REMOTE_CODE = True
+MAX_EXAMPLES = None
+PRINT_EXAMPLES = 10
 
 
 def setup_distributed():
@@ -71,6 +82,22 @@ def load_json(path):
     return data
 
 
+def get_prompt(item):
+    for key in ("prompt", "anchor", "instruction", "question", "input"):
+        value = str(item.get(key, "")).strip()
+        if value:
+            return value
+    raise KeyError(f"Could not find prompt/anchor/instruction field in item keys: {sorted(item)}")
+
+
+def get_target(item):
+    for key in ("response", "output", "answer", "completion", "target"):
+        value = str(item.get(key, "")).strip()
+        if value:
+            return value
+    raise KeyError(f"Could not find response/output/answer field in item keys: {sorted(item)}")
+
+
 def shard_data(data, rank, world_size):
     return data[rank::world_size]
 
@@ -87,8 +114,8 @@ def evaluate_file(model, tokenizer, data, device):
     for start in tqdm(range(0, len(data), BATCH_SIZE)):
         batch = data[start:start + BATCH_SIZE]
 
-        prompts = [item["prompt"] for item in batch]
-        targets = [item["response"] for item in batch]
+        prompts = [get_prompt(item) for item in batch]
+        targets = [get_target(item) for item in batch]
 
         inputs = tokenizer(
             prompts,
@@ -135,7 +162,7 @@ def evaluate_file(model, tokenizer, data, device):
             total += 1
 
             outputs.append({
-                "prompt": item["prompt"],
+                "prompt": prompts[i],
                 "target": targets[i],
                 "pass1_prediction": pred_1,
                 "pass5_predictions": pred_5,
@@ -182,8 +209,22 @@ def gather_results(local_result, distributed, rank, world_size):
     return merged
 
 
+def print_prediction_examples(name, outputs):
+    if PRINT_EXAMPLES <= 0:
+        return
+    print(f"\n{name} prediction samples:")
+    for item in outputs[:PRINT_EXAMPLES]:
+        print("-" * 60)
+        print(f"prompt: {item['prompt']}")
+        print(f"target: {item['target']}")
+        print(f"pass1:  {item['pass1_prediction']}")
+        print(f"pass1_correct: {item['pass1_correct']}")
+
+
 def evaluate_dataset(name, path, model, tokenizer, rank, world_size, distributed, device):
     full_data = load_json(path)
+    if MAX_EXAMPLES is not None:
+        full_data = full_data[:MAX_EXAMPLES]
     local_data = shard_data(full_data, rank, world_size)
 
     if rank == 0:
@@ -214,6 +255,7 @@ def evaluate_dataset(name, path, model, tokenizer, rank, world_size, distributed
         print(f"{name} Pass@1: {merged_result['pass1_accuracy']:.2f}%")
         print(f"{name} Pass@5: {merged_result['pass5_accuracy']:.2f}%")
         print(f"Saved predictions to: {output_path}")
+        print_prediction_examples(name, merged_result["outputs"])
 
         return {
             "file": path,
@@ -228,6 +270,10 @@ def evaluate_dataset(name, path, model, tokenizer, rank, world_size, distributed
 
 
 def main():
+    if LOCAL_FILES_ONLY:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
     distributed, rank, world_size, device = setup_distributed()
 
     if rank == 0:
@@ -236,8 +282,14 @@ def main():
         print(f"Using device: {device}")
         print(f"Loading model from: {MODEL_PATH}")
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-    model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_PATH)
+    load_kwargs = {
+        "trust_remote_code": TRUST_REMOTE_CODE,
+        "local_files_only": LOCAL_FILES_ONLY,
+    }
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, **load_kwargs)
+    model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_PATH, **load_kwargs)
+    if hasattr(model.config, "use_cache"):
+        model.config.use_cache = True
     model.to(device)
 
     summary = {}
@@ -253,20 +305,23 @@ def main():
         device=device,
     )
 
-    result2 = evaluate_dataset(
-        name="eval_file_2",
-        path=JSON2_PATH,
-        model=model,
-        tokenizer=tokenizer,
-        rank=rank,
-        world_size=world_size,
-        distributed=distributed,
-        device=device,
-    )
+    result2 = None
+    if JSON2_PATH:
+        result2 = evaluate_dataset(
+            name="eval_file_2",
+            path=JSON2_PATH,
+            model=model,
+            tokenizer=tokenizer,
+            rank=rank,
+            world_size=world_size,
+            distributed=distributed,
+            device=device,
+        )
 
     if rank == 0:
         summary["eval_file_1"] = result1
-        summary["eval_file_2"] = result2
+        if result2 is not None:
+            summary["eval_file_2"] = result2
 
         summary_path = os.path.join(OUTPUT_DIR, "summary.json")
 
