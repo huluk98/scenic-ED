@@ -57,6 +57,7 @@ BF16 = True
 NUM_WORKERS = 4
 LOG_EVERY = 20
 SAVE_EVERY_STEPS = 0
+SAVE_EPOCH_CHECKPOINTS = False
 EXPECTED_GPUS = 8
 DDP_TIMEOUT_MINUTES = 10
 
@@ -98,6 +99,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=NUM_WORKERS)
     parser.add_argument("--log-every", type=int, default=LOG_EVERY)
     parser.add_argument("--save-every-steps", type=int, default=SAVE_EVERY_STEPS)
+    parser.add_argument(
+        "--epoch-checkpoints",
+        action=argparse.BooleanOptionalAction,
+        default=SAVE_EPOCH_CHECKPOINTS,
+        help="Save checkpoint-epoch-N directories. Defaults off here to avoid long epoch-boundary saves.",
+    )
     parser.add_argument("--alignment-weight", type=float, default=ALIGNMENT_WEIGHT)
     parser.add_argument("--margin", type=float, default=MARGIN)
     parser.add_argument("--negative-field", default=NEGATIVE_FIELD)
@@ -141,6 +148,7 @@ def contrastive_config_from_args(args: argparse.Namespace) -> ContrastiveSFTConf
         num_workers=args.num_workers,
         log_every=args.log_every,
         save_every_steps=args.save_every_steps,
+        save_epoch_checkpoints=args.epoch_checkpoints,
         alignment_weight=args.alignment_weight,
         margin=args.margin,
         negative_field=args.negative_field,
@@ -161,6 +169,7 @@ def print_run_config(args: argparse.Namespace) -> None:
     print(f"  local_files_only: {args.local_files_only}")
     print(f"  expected_gpus: {args.expected_gpus}")
     print(f"  ddp_timeout_minutes: {args.ddp_timeout_minutes}")
+    print(f"  epoch_checkpoints: {args.epoch_checkpoints}")
     print(f"  alignment_weight: {args.alignment_weight}")
     print(f"  margin: {args.margin}")
     print(f"  negative_field: {args.negative_field}")

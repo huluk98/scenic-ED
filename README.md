@@ -158,6 +158,8 @@ nvidia-smi
 
 If `nvidia-smi` still shows old Python PIDs after that, terminate those PIDs directly with `kill -9 <pid>`. No Python cleanup hook can run after `kill -9` or a driver-level hard hang, but GPU memory is released when the owning process is gone.
 
+The dedicated `contrastive_sft.py` saves only the final model by default. Per-epoch checkpoint saves can look like a hang because rank 0 is writing model files while the other ranks wait at a DDP synchronization point. To enable epoch checkpoints anyway, pass `--epoch-checkpoints`; to disable them in the shared trainer, pass `--no-epoch-checkpoints`.
+
 For a quick 8-GPU smoke test:
 
 ```bash

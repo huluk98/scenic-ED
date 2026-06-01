@@ -67,6 +67,7 @@ class RegularSFTConfig:
     num_workers: int = 0
     log_every: int = 20
     save_every_steps: int = 0
+    save_epoch_checkpoints: bool = True
 
 
 @dataclass
@@ -534,6 +535,8 @@ def make_dataloader(
         sampler=sampler,
         collate_fn=collate_fn,
         num_workers=num_workers,
+        persistent_workers=num_workers > 0,
+        pin_memory=state.enabled,
     )
     return dataloader, sampler
 
@@ -571,6 +574,20 @@ def save_model(tokenizer: Any, model: Any, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     tokenizer.save_pretrained(output_dir)
     sanitize_model_for_save(model).save_pretrained(output_dir)
+
+
+def save_rank0_then_sync(
+    state: DistributedState,
+    tokenizer: Any,
+    model: Any,
+    output_dir: Path,
+    label: str,
+) -> None:
+    if state.is_main:
+        rank0_print(state, f"Saving {label} to {output_dir}...")
+        save_model(tokenizer, model, output_dir)
+        rank0_print(state, f"Finished saving {label}.")
+    sync_distributed(state)
 
 
 class TripletSFTModule:
@@ -698,15 +715,28 @@ def train_regular_sft(config: RegularSFTConfig | None = None) -> Path:
 
                 if config.log_every and global_step % config.log_every == 0:
                     progress.set_postfix(loss=f"{running_loss / batch_index:.4f}", step=global_step)
-                if state.is_main and config.save_every_steps and global_step % config.save_every_steps == 0:
-                    save_model(tokenizer, model, config.output_dir / f"checkpoint-step-{global_step}")
+                if config.save_every_steps and global_step % config.save_every_steps == 0:
+                    save_rank0_then_sync(
+                        state,
+                        tokenizer,
+                        model,
+                        config.output_dir / f"checkpoint-step-{global_step}",
+                        f"regular step {global_step} checkpoint",
+                    )
 
-        if state.is_main:
-            save_model(tokenizer, model, config.output_dir / f"checkpoint-epoch-{epoch}")
+        if config.save_epoch_checkpoints:
+            save_rank0_then_sync(
+                state,
+                tokenizer,
+                model,
+                config.output_dir / f"checkpoint-epoch-{epoch}",
+                f"regular epoch {epoch} checkpoint",
+            )
+        else:
+            rank0_print(state, f"Finished regular epoch {epoch}; synchronizing ranks.")
+            sync_distributed(state)
 
-    if state.is_main:
-        save_model(tokenizer, model, config.output_dir)
-    sync_distributed(state)
+    save_rank0_then_sync(state, tokenizer, model, config.output_dir, "regular final model")
     cleanup_distributed(state)
     release_cuda_memory()
     return config.output_dir
@@ -810,15 +840,28 @@ def train_contrastive_triplet_sft(config: ContrastiveSFTConfig | None = None) ->
                         align=f"{running_align / batch_index:.4f}",
                         step=global_step,
                     )
-                if state.is_main and config.save_every_steps and global_step % config.save_every_steps == 0:
-                    save_model(tokenizer, model, config.output_dir / f"checkpoint-step-{global_step}")
+                if config.save_every_steps and global_step % config.save_every_steps == 0:
+                    save_rank0_then_sync(
+                        state,
+                        tokenizer,
+                        model,
+                        config.output_dir / f"checkpoint-step-{global_step}",
+                        f"triplet step {global_step} checkpoint",
+                    )
 
-        if state.is_main:
-            save_model(tokenizer, model, config.output_dir / f"checkpoint-epoch-{epoch}")
+        if config.save_epoch_checkpoints:
+            save_rank0_then_sync(
+                state,
+                tokenizer,
+                model,
+                config.output_dir / f"checkpoint-epoch-{epoch}",
+                f"triplet epoch {epoch} checkpoint",
+            )
+        else:
+            rank0_print(state, f"Finished triplet epoch {epoch}; synchronizing ranks.")
+            sync_distributed(state)
 
-    if state.is_main:
-        save_model(tokenizer, model, config.output_dir)
-    sync_distributed(state)
+    save_rank0_then_sync(state, tokenizer, model, config.output_dir, "triplet final model")
     cleanup_distributed(state)
     release_cuda_memory()
     return config.output_dir
@@ -863,6 +906,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--save-every-steps", type=int, default=0)
+    parser.add_argument(
+        "--epoch-checkpoints",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Save checkpoint-epoch-N directories. Use --no-epoch-checkpoints to save only the final model.",
+    )
     parser.add_argument(
         "--ddp-timeout-minutes",
         type=int,
@@ -912,6 +961,7 @@ def regular_config_from_args(args: argparse.Namespace) -> RegularSFTConfig:
         num_workers=args.num_workers,
         log_every=args.log_every,
         save_every_steps=args.save_every_steps,
+        save_epoch_checkpoints=args.epoch_checkpoints,
     )
 
 
@@ -941,6 +991,7 @@ def contrastive_config_from_args(args: argparse.Namespace) -> ContrastiveSFTConf
         num_workers=args.num_workers,
         log_every=args.log_every,
         save_every_steps=args.save_every_steps,
+        save_epoch_checkpoints=args.epoch_checkpoints,
         alignment_weight=args.alignment_weight,
         margin=args.margin,
         negative_field=args.negative_field,
