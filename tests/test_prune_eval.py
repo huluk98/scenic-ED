@@ -13,7 +13,7 @@ SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from aggregate_prune_eval_reports import build_aggregate_report
+from aggregate_prune_eval_reports import build_aggregate_report, discover_method_reports
 from scenic_prune_eval import (
     CalibrationDataset,
     DistributedState,
@@ -267,3 +267,20 @@ def test_aggregate_prune_eval_reports_keeps_all_method_em_metrics(tmp_path: Path
         "accuracy": 0.25,
         "accuracy_percent": 25.0,
     } in aggregate["table"]
+
+
+def test_aggregate_prune_eval_reports_discovers_method_reports(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    for dirname in ("magnitude_50", "wanda_50", "gradient_50", "nvidia24_50"):
+        report_dir = run_dir / dirname
+        report_dir.mkdir(parents=True)
+        (report_dir / "prune_eval_report.json").write_text("{}", encoding="utf-8")
+
+    discovered = discover_method_reports(run_dir)
+
+    assert discovered == [
+        ("gradient", run_dir / "gradient_50" / "prune_eval_report.json"),
+        ("magnitude", run_dir / "magnitude_50" / "prune_eval_report.json"),
+        ("nvidia24", run_dir / "nvidia24_50" / "prune_eval_report.json"),
+        ("wanda", run_dir / "wanda_50" / "prune_eval_report.json"),
+    ]

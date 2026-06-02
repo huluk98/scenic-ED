@@ -16,14 +16,23 @@ METHOD_ALIASES = {
     "nvidia": "nvidia24",
     "nvidia24": "nvidia24",
 }
+KNOWN_METHOD_DIRS = {
+    "magnitude_50": "magnitude",
+    "wanda_50": "wanda",
+    "gradient_50": "gradient",
+    "nvidia_50": "nvidia24",
+    "nvidia24_50": "nvidia24",
+    "2of4_50": "nvidia24",
+}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Aggregate per-method SCENIC prune/eval JSON reports.")
-    parser.add_argument("--output-json", required=True)
-    parser.add_argument("--base-model", required=True)
-    parser.add_argument("--contrastive-model", required=True)
-    parser.add_argument("--epochs", type=int, required=True)
+    parser.add_argument("--run-dir", default=None, help="Directory containing per-method *_50/prune_eval_report.json files.")
+    parser.add_argument("--output-json", default=None)
+    parser.add_argument("--base-model", default=None)
+    parser.add_argument("--contrastive-model", default=None)
+    parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--sparsity", type=float, default=0.5)
     parser.add_argument("--contrastive-train-json", default=None)
     parser.add_argument("--report", action="append", default=[], help="Method report in method=/path/report.json form.")
@@ -48,12 +57,64 @@ def parse_method_report(value: str) -> tuple[str, Path]:
     return method, report_path
 
 
+def infer_method_from_report_path(report_path: Path) -> str | None:
+    parent_name = report_path.parent.name
+    if parent_name in KNOWN_METHOD_DIRS:
+        return KNOWN_METHOD_DIRS[parent_name]
+    for suffix in ("_50", "-50"):
+        if parent_name.endswith(suffix):
+            return canonical_method_name(parent_name[: -len(suffix)])
+    return None
+
+
+def discover_method_reports(run_dir: Path) -> list[tuple[str, Path]]:
+    if not run_dir.exists():
+        raise FileNotFoundError(f"Run directory does not exist: {run_dir}")
+    reports: list[tuple[str, Path]] = []
+    for report_path in sorted(run_dir.glob("*/prune_eval_report.json")):
+        method = infer_method_from_report_path(report_path)
+        if method is not None:
+            reports.append((method, report_path))
+    if not reports:
+        raise FileNotFoundError(f"No per-method prune_eval_report.json files found under {run_dir}")
+    deduped: dict[str, Path] = {}
+    for method, report_path in reports:
+        deduped[method] = report_path
+    return sorted(deduped.items())
+
+
 def read_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         value = json.load(handle)
     if not isinstance(value, dict):
         raise ValueError(f"{path} must contain a JSON object.")
     return value
+
+
+def infer_run_metadata(
+    method_reports: list[tuple[str, Path]],
+    run_dir: Path | None,
+) -> dict[str, Any]:
+    first_report = read_json(method_reports[0][1])
+    inferred: dict[str, Any] = {
+        "base_model": None,
+        "contrastive_model": first_report.get("input_model_path"),
+        "contrastive_train_json": None,
+        "sparsity": None,
+    }
+    datasets = first_report.get("datasets", {})
+    if isinstance(datasets, dict):
+        calibration = datasets.get("calibration", {})
+        if isinstance(calibration, dict):
+            inferred["contrastive_train_json"] = calibration.get("path")
+    pruning = first_report.get("pruning", {})
+    if isinstance(pruning, dict):
+        inferred["sparsity"] = pruning.get("sparsity")
+    if run_dir is not None:
+        base_model_dir = run_dir / "base_model"
+        if base_model_dir.exists():
+            inferred["base_model"] = str(base_model_dir)
+    return inferred
 
 
 def compact_dataset_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
@@ -157,16 +218,25 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def main() -> None:
     args = parse_args()
+    run_dir = Path(args.run_dir).expanduser() if args.run_dir else None
     method_reports = [parse_method_report(value) for value in args.report]
+    if run_dir is not None:
+        method_reports.extend(discover_method_reports(run_dir))
+    if not method_reports:
+        raise SystemExit("Provide --run-dir or at least one --report method=/path/prune_eval_report.json.")
+    method_reports = sorted(dict(method_reports).items())
+    inferred = infer_run_metadata(method_reports, run_dir)
+    output_json = Path(args.output_json).expanduser() if args.output_json else (
+        run_dir / "all_pruning_em_report.json" if run_dir is not None else Path("all_pruning_em_report.json")
+    )
     aggregate = build_aggregate_report(
-        base_model=args.base_model,
-        contrastive_model=args.contrastive_model,
-        contrastive_train_json=args.contrastive_train_json,
+        base_model=args.base_model or inferred["base_model"] or "unknown",
+        contrastive_model=args.contrastive_model or inferred["contrastive_model"] or "unknown",
+        contrastive_train_json=args.contrastive_train_json or inferred["contrastive_train_json"],
         epochs=args.epochs,
-        sparsity=args.sparsity,
+        sparsity=args.sparsity if args.sparsity is not None else float(inferred["sparsity"] or 0.5),
         method_reports=method_reports,
     )
-    output_json = Path(args.output_json).expanduser()
     write_json(output_json, aggregate)
     print(f"Wrote all-method prune/eval JSON: {output_json}")
 
