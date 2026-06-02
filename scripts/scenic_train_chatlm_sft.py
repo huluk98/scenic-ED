@@ -43,6 +43,13 @@ TOKENIZER_ASSET_FILENAMES = (
     "merges.txt",
 )
 FAST_TOKENIZER_CONFIG_KEYS = ("tokenizer_file", "fast_tokenizer_files")
+CUSTOM_CODE_GLOBS = (
+    "configuration*.py",
+    "modeling*.py",
+    "tokenization*.py",
+    "generation*.py",
+    "processing*.py",
+)
 
 
 @dataclass
@@ -436,23 +443,61 @@ def checkpoint_tokenizer_source_dir(checkpoint_dir: Path) -> Path | None:
     return None
 
 
+def flatten_auto_map(auto_map: Any) -> list[str]:
+    if not isinstance(auto_map, dict):
+        return []
+    values: list[str] = []
+    for value in auto_map.values():
+        if isinstance(value, str):
+            values.append(value)
+        elif isinstance(value, list):
+            values.extend(item for item in value if isinstance(item, str))
+    return values
+
+
+def custom_code_filenames_from_config(config: dict[str, Any] | None) -> list[str]:
+    if not config:
+        return []
+    filenames: list[str] = []
+    for value in flatten_auto_map(config.get("auto_map")):
+        module_reference = value.split("--", 1)[-1]
+        module_name = module_reference.split(".", 1)[0]
+        if module_name and not module_name.startswith("transformers"):
+            filename = f"{module_name}.py"
+            if filename not in filenames:
+                filenames.append(filename)
+    return filenames
+
+
+def copy_file_if_missing(source: Path, destination: Path) -> None:
+    if source.exists() and source.is_file() and not destination.exists():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination, follow_symlinks=True)
+
+
 def copy_missing_tokenizer_assets(source_dir: Path | None, output_dir: Path) -> None:
     if source_dir is None or not source_dir.is_dir() or path_is_same(source_dir, output_dir):
         return
     output_dir.mkdir(parents=True, exist_ok=True)
     for filename in TOKENIZER_ASSET_FILENAMES:
-        source = source_dir / filename
-        destination = output_dir / filename
-        if source.exists() and not destination.exists():
-            shutil.copy2(source, destination, follow_symlinks=True)
-    for source in source_dir.glob("tokenization*.py"):
-        destination = output_dir / source.name
-        if source.is_file() and not destination.exists():
-            shutil.copy2(source, destination, follow_symlinks=True)
+        copy_file_if_missing(source_dir / filename, output_dir / filename)
     for source in source_dir.glob("*.model"):
-        destination = output_dir / source.name
-        if source.is_file() and not destination.exists():
-            shutil.copy2(source, destination, follow_symlinks=True)
+        copy_file_if_missing(source, output_dir / source.name)
+
+
+def copy_missing_custom_code_assets(source_dir: Path | None, output_dir: Path) -> None:
+    if source_dir is None or not source_dir.is_dir() or path_is_same(source_dir, output_dir):
+        return
+    output_dir.mkdir(parents=True, exist_ok=True)
+    wanted = set(custom_code_filenames_from_config(read_json_dict(output_dir / "config.json")))
+    wanted.update(custom_code_filenames_from_config(read_json_dict(output_dir / "tokenizer_config.json")))
+    wanted.update(custom_code_filenames_from_config(read_json_dict(source_dir / "config.json")))
+    wanted.update(custom_code_filenames_from_config(read_json_dict(source_dir / "tokenizer_config.json")))
+    for filename in sorted(wanted):
+        copy_file_if_missing(source_dir / filename, output_dir / filename)
+    for pattern in CUSTOM_CODE_GLOBS:
+        for source in source_dir.glob(pattern):
+            copy_file_if_missing(source, output_dir / source.name)
 
 
 def strip_fast_tokenizer_config(config: dict[str, Any]) -> None:
@@ -486,6 +531,7 @@ def repair_tokenizer_files_for_auto_load(output_dir: Path, source_dir: Path | No
     output_dir = Path(output_dir).expanduser()
     source_dir = source_dir or checkpoint_tokenizer_source_dir(output_dir)
     copy_missing_tokenizer_assets(source_dir, output_dir)
+    copy_missing_custom_code_assets(source_dir, output_dir)
 
     config_path = output_dir / "tokenizer_config.json"
     config = read_json_dict(config_path)
@@ -519,6 +565,11 @@ def save_tokenizer_for_auto_load(tokenizer: Any, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     source_dir = tokenizer_source_dir(tokenizer)
     sanitize_tokenizer_for_save(tokenizer).save_pretrained(output_dir)
+    repair_tokenizer_files_for_auto_load(output_dir, source_dir=source_dir)
+
+
+def repair_checkpoint_for_auto_load(output_dir: Path, tokenizer: Any | None = None) -> None:
+    source_dir = tokenizer_source_dir(tokenizer) if tokenizer is not None else None
     repair_tokenizer_files_for_auto_load(output_dir, source_dir=source_dir)
 
 
@@ -756,6 +807,7 @@ def save_model(tokenizer: Any, model: Any, output_dir: Path, safe_serialization:
     output_dir.mkdir(parents=True, exist_ok=True)
     save_tokenizer_for_auto_load(tokenizer, output_dir)
     sanitize_model_for_save(model).save_pretrained(output_dir, safe_serialization=safe_serialization)
+    repair_checkpoint_for_auto_load(output_dir, tokenizer=tokenizer)
 
 
 def save_rank0_then_sync(
@@ -800,6 +852,7 @@ def save_final_rank0_after_training(
     save_tokenizer_for_auto_load(tokenizer, output_dir)
     rank0_print(state, f"Tokenizer saved for {label}; saving model weights...")
     model_to_save.save_pretrained(output_dir, safe_serialization=safe_serialization)
+    repair_checkpoint_for_auto_load(output_dir, tokenizer=tokenizer)
     rank0_print(state, f"Finished saving {label}.")
     release_cuda_memory()
 

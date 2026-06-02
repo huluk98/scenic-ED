@@ -25,6 +25,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from scenic_train_chatlm_sft import (  # noqa: E402
+    repair_checkpoint_for_auto_load,
     repair_tokenizer_files_for_auto_load,
     sanitize_model_for_save,
     save_tokenizer_for_auto_load,
@@ -688,6 +689,7 @@ def save_pruned_model(model: nn.Module, tokenizer: Any, output_dir: Path) -> Non
     output_dir.mkdir(parents=True, exist_ok=True)
     save_tokenizer_for_auto_load(tokenizer, output_dir)
     sanitize_model_for_save(model).save_pretrained(output_dir, safe_serialization=True)
+    repair_checkpoint_for_auto_load(output_dir, tokenizer=tokenizer)
 
 
 def evaluate_all(

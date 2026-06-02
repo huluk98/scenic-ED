@@ -101,3 +101,28 @@ def test_repair_tokenizer_config_removes_tokenizersbackend_without_source(tmp_pa
     assert "tokenizer_file" not in repaired
     assert repaired["_scenic_removed_tokenizer_class"] == "TokenizersBackend"
     assert repaired["_scenic_removed_fast_tokenizer_keys"] == ["tokenizer_file"]
+
+
+def test_repair_checkpoint_copies_custom_modeling_code_from_source(tmp_path: Path) -> None:
+    source_dir = tmp_path / "base"
+    output_dir = tmp_path / "fine_tuned"
+    source_dir.mkdir()
+    output_dir.mkdir()
+    (source_dir / "modeling_chat.py").write_text("# custom model code\n", encoding="utf-8")
+    (source_dir / "configuration_chat.py").write_text("# custom config code\n", encoding="utf-8")
+    (output_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "auto_map": {
+                    "AutoConfig": "configuration_chat.ChatConfig",
+                    "AutoModelForSeq2SeqLM": "modeling_chat.ChatForConditionalGeneration",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    repair_tokenizer_files_for_auto_load(output_dir, source_dir=source_dir)
+
+    assert (output_dir / "modeling_chat.py").exists()
+    assert (output_dir / "configuration_chat.py").exists()
