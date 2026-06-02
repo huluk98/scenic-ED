@@ -90,7 +90,7 @@ def test_repair_tokenizer_config_removes_tokenizersbackend_without_source(tmp_pa
     output_dir = tmp_path / "fine_tuned"
     output_dir.mkdir()
     (output_dir / "tokenizer_config.json").write_text(
-        json.dumps({"tokenizer_class": "TokenizersBackend"}),
+        json.dumps({"tokenizer_class": "TokenizersBackend", "tokenizer_file": "tokenizer.json"}),
         encoding="utf-8",
     )
 
@@ -98,4 +98,6 @@ def test_repair_tokenizer_config_removes_tokenizersbackend_without_source(tmp_pa
 
     repaired = json.loads((output_dir / "tokenizer_config.json").read_text(encoding="utf-8"))
     assert "tokenizer_class" not in repaired
+    assert "tokenizer_file" not in repaired
     assert repaired["_scenic_removed_tokenizer_class"] == "TokenizersBackend"
+    assert repaired["_scenic_removed_fast_tokenizer_keys"] == ["tokenizer_file"]

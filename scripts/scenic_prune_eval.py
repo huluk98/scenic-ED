@@ -291,7 +291,7 @@ def load_model_and_tokenizer(args: argparse.Namespace, model_path: str, state: D
         "trust_remote_code": args.trust_remote_code,
         "local_files_only": args.local_files_only,
     }
-    tokenizer_kwargs = dict(load_kwargs)
+    tokenizer_kwargs = {**load_kwargs, "use_fast": False}
     model_kwargs = dict(load_kwargs)
     if state.device.type == "cuda":
         if args.bf16:

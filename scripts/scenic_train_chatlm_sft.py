@@ -42,6 +42,7 @@ TOKENIZER_ASSET_FILENAMES = (
     "vocab.txt",
     "merges.txt",
 )
+FAST_TOKENIZER_CONFIG_KEYS = ("tokenizer_file", "fast_tokenizer_files")
 
 
 @dataclass
@@ -448,15 +449,37 @@ def copy_missing_tokenizer_assets(source_dir: Path | None, output_dir: Path) -> 
         destination = output_dir / source.name
         if source.is_file() and not destination.exists():
             shutil.copy2(source, destination, follow_symlinks=True)
+    for source in source_dir.glob("*.model"):
+        destination = output_dir / source.name
+        if source.is_file() and not destination.exists():
+            shutil.copy2(source, destination, follow_symlinks=True)
+
+
+def strip_fast_tokenizer_config(config: dict[str, Any]) -> None:
+    removed = [key for key in FAST_TOKENIZER_CONFIG_KEYS if key in config]
+    for key in removed:
+        config.pop(key, None)
+    if removed:
+        config["_scenic_removed_fast_tokenizer_keys"] = removed
+
+
+def normalize_tokenizer_config(config: dict[str, Any]) -> dict[str, Any]:
+    safe_config = json_safe_value(config)
+    tokenizer_class = safe_config.get("tokenizer_class")
+    if is_bad_tokenizer_class(tokenizer_class):
+        safe_config.pop("tokenizer_class", None)
+        safe_config["_scenic_removed_tokenizer_class"] = tokenizer_class
+        strip_fast_tokenizer_config(safe_config)
+    return safe_config
 
 
 def valid_source_tokenizer_config(source_dir: Path | None) -> dict[str, Any] | None:
     if source_dir is None:
         return None
     config = read_json_dict(source_dir / "tokenizer_config.json")
-    if not config or is_bad_tokenizer_class(config.get("tokenizer_class")):
+    if not config:
         return None
-    return json_safe_value(config)
+    return normalize_tokenizer_config(config)
 
 
 def repair_tokenizer_files_for_auto_load(output_dir: Path, source_dir: Path | None = None) -> None:
@@ -472,15 +495,21 @@ def repair_tokenizer_files_for_auto_load(output_dir: Path, source_dir: Path | No
             write_json_dict(config_path, source_config)
         return
 
-    safe_config = json_safe_value(config)
-    tokenizer_class = safe_config.get("tokenizer_class")
-    if is_bad_tokenizer_class(tokenizer_class):
+    raw_tokenizer_class = config.get("tokenizer_class")
+    if is_bad_tokenizer_class(raw_tokenizer_class):
         source_config = valid_source_tokenizer_config(source_dir)
         if source_config is not None:
             safe_config = source_config
         else:
+            safe_config = json_safe_value(config)
             safe_config.pop("tokenizer_class", None)
-            safe_config["_scenic_removed_tokenizer_class"] = tokenizer_class
+            safe_config["_scenic_removed_tokenizer_class"] = raw_tokenizer_class
+            strip_fast_tokenizer_config(safe_config)
+    else:
+        safe_config = normalize_tokenizer_config(config)
+        tokenizer_class = safe_config.get("tokenizer_class")
+        if not tokenizer_class and not safe_config.get("auto_map"):
+            strip_fast_tokenizer_config(safe_config)
 
     if safe_config != config:
         write_json_dict(config_path, safe_config)
@@ -507,7 +536,7 @@ def load_chatlm_stack(config: RegularSFTConfig, state: DistributedState) -> tupl
     }
     if config.cache_dir is not None:
         load_kwargs["cache_dir"] = str(config.cache_dir.expanduser())
-    tokenizer_kwargs = dict(load_kwargs)
+    tokenizer_kwargs = {**load_kwargs, "use_fast": False}
     model_kwargs = dict(load_kwargs)
     dtype = model_load_dtype(config, device)
     if dtype is not None:

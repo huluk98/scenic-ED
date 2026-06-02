@@ -14,6 +14,7 @@ Useful env overrides:
   CONTRASTIVE_OUTPUT_DIR=models/chatlm_scenic_triplet_sft_5epoch
   FINAL_JSON=prune_eval_outputs/my_run/all_pruning_em_report.json
   NPROC_PER_NODE=8
+  LOCAL_BASE_MODEL_DIR=prune_eval_outputs/my_run/base_model
   LOCAL_FILES_ONLY=1        # force local/offline base model loading
   LOCAL_FILES_ONLY=0        # allow Hugging Face base model loading
   SKIP_TRAIN=1              # reuse CONTRASTIVE_OUTPUT_DIR and only prune/eval
@@ -49,6 +50,7 @@ SAFE_BASE="$(basename "$BASE_MODEL" | tr -c 'A-Za-z0-9_.-' '_')"
 SAFE_BASE="${SAFE_BASE%_}"
 SAFE_BASE="${SAFE_BASE:-chatlm}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-prune_eval_outputs/${SAFE_BASE}_contrastive5_all50_${RUN_ID}}"
+LOCAL_BASE_MODEL_DIR="${LOCAL_BASE_MODEL_DIR:-${OUTPUT_ROOT}/base_model}"
 CONTRASTIVE_OUTPUT_DIR="${CONTRASTIVE_OUTPUT_DIR:-${OUTPUT_ROOT}/contrastive_sft_5epoch}"
 FINAL_JSON="${FINAL_JSON:-${OUTPUT_ROOT}/all_pruning_em_report.json}"
 
@@ -103,6 +105,20 @@ case "${LOCAL_FILES_ONLY:-auto}" in
     ;;
 esac
 
+TRAIN_MODEL="$BASE_MODEL"
+if [[ ! -d "$BASE_MODEL" && "$USE_LOCAL_FILES_ONLY" -eq 0 ]]; then
+  if ! command -v huggingface-cli >/dev/null 2>&1; then
+    echo "huggingface-cli is required to materialize HF model id '$BASE_MODEL' into a local directory." >&2
+    echo "Install huggingface_hub or pass a local base model directory instead." >&2
+    exit 2
+  fi
+  mkdir -p "$LOCAL_BASE_MODEL_DIR"
+  echo "Downloading base model '$BASE_MODEL' into: $LOCAL_BASE_MODEL_DIR"
+  huggingface-cli download "$BASE_MODEL" --local-dir "$LOCAL_BASE_MODEL_DIR"
+  TRAIN_MODEL="$LOCAL_BASE_MODEL_DIR"
+  USE_LOCAL_FILES_ONLY=1
+fi
+
 TRAIN_LOCAL_ARGS=()
 if [[ "$USE_LOCAL_FILES_ONLY" -eq 1 ]]; then
   export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
@@ -119,6 +135,7 @@ fi
 mkdir -p "$OUTPUT_ROOT"
 
 echo "Base model: $BASE_MODEL"
+echo "Training model path: $TRAIN_MODEL"
 echo "Contrastive output: $CONTRASTIVE_OUTPUT_DIR"
 echo "Final all-method JSON: $FINAL_JSON"
 echo "NPROC_PER_NODE: $NPROC_PER_NODE"
@@ -126,7 +143,7 @@ echo "LOCAL_FILES_ONLY for base model: $USE_LOCAL_FILES_ONLY"
 
 TRAIN_ARGS=(
   contrastive_sft.py
-  --model "$BASE_MODEL"
+  --model "$TRAIN_MODEL"
   --train-json "$CONTRASTIVE_TRAIN_JSON"
   --output-dir "$CONTRASTIVE_OUTPUT_DIR"
   --epochs "$EPOCHS"
@@ -158,6 +175,12 @@ else
   else
     "$PYTHON" "${TRAIN_ARGS[@]}" --allow-single-gpu
   fi
+fi
+
+if [[ -d "$TRAIN_MODEL" ]]; then
+  "$PYTHON" scripts/repair_checkpoint_tokenizer.py \
+    --checkpoint "$CONTRASTIVE_OUTPUT_DIR" \
+    --source-tokenizer "$TRAIN_MODEL"
 fi
 
 AGG_REPORT_ARGS=()

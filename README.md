@@ -234,3 +234,5 @@ bash scripts/run_contrastive_5epoch_all_prune_50.sh charent/ChatLM-mini-Chinese
 ```
 
 This trains contrastive triplet SFT for 5 epochs, then runs 50% `magnitude`, `wanda`, `gradient`, and NVIDIA `2:4` pruning. It writes one final JSON at `prune_eval_outputs/<run>/all_pruning_em_report.json` with benchmark and training-set EM@1/EM@5 for the original contrastive model and each pruned model. If you already have the base model downloaded locally, pass that directory or force offline loading with `LOCAL_FILES_ONLY=1`.
+
+When you pass the Hugging Face id directly, the launcher first downloads it into the run directory and trains from that local copy. This preserves the original tokenizer assets for pruning reloads and avoids fast-tokenizer backend errors such as `TokenizersBackend` or `argument 'vocab': 'dict' object cannot be converted to 'Sequence'`.
