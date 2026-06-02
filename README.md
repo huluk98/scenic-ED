@@ -69,14 +69,14 @@ python3 -m pip install -U certifi huggingface_hub transformers requests urllib3
 If the network still rewrites Hugging Face certificates, download the model once from a working network and train from the local directory:
 
 ```bash
-huggingface-cli download charent/ChatLM-mini-Chinese --local-dir models/ChatLM-mini-Chinese
+hf download charent/ChatLM-mini-Chinese --local-dir models/ChatLM-mini-Chinese
 python3 scripts/scenic_train_chatlm_sft.py --mode regular --model models/ChatLM-mini-Chinese --local-files-only --epochs 1 --max-examples 16
 ```
 
 If an 8-GPU run fails at startup with `Cannot send a request, as the client has been closed`, download the model once before launching DDP and then run with `--local-files-only`:
 
 ```bash
-huggingface-cli download charent/ChatLM-mini-Chinese --local-dir models/ChatLM-mini-Chinese
+hf download charent/ChatLM-mini-Chinese --local-dir models/ChatLM-mini-Chinese
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 torchrun --standalone --nproc_per_node=8 scripts/scenic_train_chatlm_sft.py \
@@ -90,7 +90,7 @@ torchrun --standalone --nproc_per_node=8 scripts/scenic_train_chatlm_sft.py \
 
 Use the same local/offline pattern if loading weights succeeds but then fails on an SSL hostname mismatch for `additional_chat_templates`; that is a late Transformers Hub lookup, not a training failure.
 
-If the model is already in the Hugging Face cache and `huggingface-cli download` fails, skip the download and find the cached snapshot:
+If the model is already in the Hugging Face cache and `hf download` fails, skip the download and find the cached snapshot:
 
 ```bash
 python scripts/find_chatlm_cache.py

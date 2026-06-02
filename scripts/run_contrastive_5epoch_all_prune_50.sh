@@ -79,6 +79,22 @@ detect_nproc() {
   echo "1"
 }
 
+download_hf_model() {
+  local model_id="$1"
+  local output_dir="$2"
+  if command -v hf >/dev/null 2>&1; then
+    hf download "$model_id" --local-dir "$output_dir"
+    return
+  fi
+  if command -v huggingface-cli >/dev/null 2>&1; then
+    huggingface-cli download "$model_id" --local-dir "$output_dir"
+    return
+  fi
+  echo "The Hugging Face CLI is required to materialize HF model id '$model_id' into a local directory." >&2
+  echo "Install huggingface_hub so the 'hf' command is available, or pass a local base model directory instead." >&2
+  exit 2
+}
+
 NPROC_PER_NODE="${NPROC_PER_NODE:-$(detect_nproc)}"
 if [[ -z "${CUDA_VISIBLE_DEVICES:-}" && "$NPROC_PER_NODE" -gt 1 ]]; then
   CUDA_VISIBLE_DEVICES="$(seq -s, 0 $((NPROC_PER_NODE - 1)))"
@@ -107,14 +123,9 @@ esac
 
 TRAIN_MODEL="$BASE_MODEL"
 if [[ ! -d "$BASE_MODEL" && "$USE_LOCAL_FILES_ONLY" -eq 0 ]]; then
-  if ! command -v huggingface-cli >/dev/null 2>&1; then
-    echo "huggingface-cli is required to materialize HF model id '$BASE_MODEL' into a local directory." >&2
-    echo "Install huggingface_hub or pass a local base model directory instead." >&2
-    exit 2
-  fi
   mkdir -p "$LOCAL_BASE_MODEL_DIR"
   echo "Downloading base model '$BASE_MODEL' into: $LOCAL_BASE_MODEL_DIR"
-  huggingface-cli download "$BASE_MODEL" --local-dir "$LOCAL_BASE_MODEL_DIR"
+  download_hf_model "$BASE_MODEL" "$LOCAL_BASE_MODEL_DIR"
   TRAIN_MODEL="$LOCAL_BASE_MODEL_DIR"
   USE_LOCAL_FILES_ONLY=1
 fi

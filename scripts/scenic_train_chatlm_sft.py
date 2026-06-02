@@ -596,7 +596,7 @@ def raise_model_load_error(config: RegularSFTConfig, exc: Exception) -> None:
             "Failed to load ChatLM model files because the Hugging Face request hit an SSL/certificate error. "
             "This is usually a VPN/proxy/captive-network/CA-bundle issue, not a training issue. "
             "Try upgrading certifi/huggingface_hub/transformers, disabling the proxy or VPN, or download the model once "
-            "with `huggingface-cli download charent/ChatLM-mini-Chinese --local-dir models/ChatLM-mini-Chinese` "
+            "with `hf download charent/ChatLM-mini-Chinese --local-dir models/ChatLM-mini-Chinese` "
             "and rerun with `--model models/ChatLM-mini-Chinese --local-files-only`."
         )
         raise RuntimeError(hint) from exc
