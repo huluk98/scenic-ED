@@ -7,6 +7,7 @@ import json
 import math
 import os
 import random
+import shutil
 import signal
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -29,6 +30,18 @@ RESPONSE_FIELDS = ("response", "output", "answer", "completion", "target", "y")
 POSITIVE_FIELDS = ("positive", "pos", "x_positive", "x_plus", "chosen")
 NEGATIVE_FIELDS = ("negative", "neg", "x_negative", "x_minus", "rejected")
 DEFAULT_DDP_TIMEOUT_MINUTES = 10
+BAD_TOKENIZER_CLASSES = {"tokenizersbackend"}
+TOKENIZER_ASSET_FILENAMES = (
+    "tokenizer_config.json",
+    "tokenizer.json",
+    "special_tokens_map.json",
+    "added_tokens.json",
+    "spiece.model",
+    "sentencepiece.bpe.model",
+    "vocab.json",
+    "vocab.txt",
+    "merges.txt",
+)
 
 
 @dataclass
@@ -367,6 +380,119 @@ def sanitize_tokenizer_for_save(tokenizer: Any) -> Any:
     return tokenizer
 
 
+def is_bad_tokenizer_class(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    normalized = value.replace("_", "").replace("-", "").lower()
+    return normalized in BAD_TOKENIZER_CLASSES or normalized.endswith(".tokenizersbackend")
+
+
+def read_json_dict(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    with path.open("r", encoding="utf-8") as handle:
+        value = json.load(handle)
+    return value if isinstance(value, dict) else None
+
+
+def write_json_dict(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+
+
+def path_is_same(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return False
+
+
+def tokenizer_source_dir(tokenizer: Any) -> Path | None:
+    for attr in ("name_or_path", "_name_or_path"):
+        value = getattr(tokenizer, attr, None)
+        if not value:
+            continue
+        path = Path(str(value)).expanduser()
+        if path.is_dir():
+            return path
+    return None
+
+
+def checkpoint_tokenizer_source_dir(checkpoint_dir: Path) -> Path | None:
+    for filename in ("tokenizer_config.json", "config.json"):
+        config = read_json_dict(checkpoint_dir / filename)
+        if not config:
+            continue
+        for key in ("_name_or_path", "name_or_path"):
+            value = config.get(key)
+            if not value:
+                continue
+            path = Path(str(value)).expanduser()
+            if path.is_dir() and not path_is_same(path, checkpoint_dir):
+                return path
+    return None
+
+
+def copy_missing_tokenizer_assets(source_dir: Path | None, output_dir: Path) -> None:
+    if source_dir is None or not source_dir.is_dir() or path_is_same(source_dir, output_dir):
+        return
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for filename in TOKENIZER_ASSET_FILENAMES:
+        source = source_dir / filename
+        destination = output_dir / filename
+        if source.exists() and not destination.exists():
+            shutil.copy2(source, destination, follow_symlinks=True)
+    for source in source_dir.glob("tokenization*.py"):
+        destination = output_dir / source.name
+        if source.is_file() and not destination.exists():
+            shutil.copy2(source, destination, follow_symlinks=True)
+
+
+def valid_source_tokenizer_config(source_dir: Path | None) -> dict[str, Any] | None:
+    if source_dir is None:
+        return None
+    config = read_json_dict(source_dir / "tokenizer_config.json")
+    if not config or is_bad_tokenizer_class(config.get("tokenizer_class")):
+        return None
+    return json_safe_value(config)
+
+
+def repair_tokenizer_files_for_auto_load(output_dir: Path, source_dir: Path | None = None) -> None:
+    output_dir = Path(output_dir).expanduser()
+    source_dir = source_dir or checkpoint_tokenizer_source_dir(output_dir)
+    copy_missing_tokenizer_assets(source_dir, output_dir)
+
+    config_path = output_dir / "tokenizer_config.json"
+    config = read_json_dict(config_path)
+    if config is None:
+        source_config = valid_source_tokenizer_config(source_dir)
+        if source_config is not None:
+            write_json_dict(config_path, source_config)
+        return
+
+    safe_config = json_safe_value(config)
+    tokenizer_class = safe_config.get("tokenizer_class")
+    if is_bad_tokenizer_class(tokenizer_class):
+        source_config = valid_source_tokenizer_config(source_dir)
+        if source_config is not None:
+            safe_config = source_config
+        else:
+            safe_config.pop("tokenizer_class", None)
+            safe_config["_scenic_removed_tokenizer_class"] = tokenizer_class
+
+    if safe_config != config:
+        write_json_dict(config_path, safe_config)
+
+
+def save_tokenizer_for_auto_load(tokenizer: Any, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    source_dir = tokenizer_source_dir(tokenizer)
+    sanitize_tokenizer_for_save(tokenizer).save_pretrained(output_dir)
+    repair_tokenizer_files_for_auto_load(output_dir, source_dir=source_dir)
+
+
 def load_chatlm_stack(config: RegularSFTConfig, state: DistributedState) -> tuple[Any, Any, Any]:
     if config.local_files_only:
         force_huggingface_offline()
@@ -599,7 +725,7 @@ def autocast_context(config: RegularSFTConfig, device: Any) -> Any:
 
 def save_model(tokenizer: Any, model: Any, output_dir: Path, safe_serialization: bool = True) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    sanitize_tokenizer_for_save(tokenizer).save_pretrained(output_dir)
+    save_tokenizer_for_auto_load(tokenizer, output_dir)
     sanitize_model_for_save(model).save_pretrained(output_dir, safe_serialization=safe_serialization)
 
 
@@ -642,7 +768,7 @@ def save_final_rank0_after_training(
 
     rank0_print(state, f"Saving {label} to {output_dir}...")
     output_dir.mkdir(parents=True, exist_ok=True)
-    sanitize_tokenizer_for_save(tokenizer).save_pretrained(output_dir)
+    save_tokenizer_for_auto_load(tokenizer, output_dir)
     rank0_print(state, f"Tokenizer saved for {label}; saving model weights...")
     model_to_save.save_pretrained(output_dir, safe_serialization=safe_serialization)
     rank0_print(state, f"Finished saving {label}.")

@@ -24,7 +24,11 @@ SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from scenic_train_chatlm_sft import sanitize_model_for_save  # noqa: E402
+from scenic_train_chatlm_sft import (  # noqa: E402
+    repair_tokenizer_files_for_auto_load,
+    sanitize_model_for_save,
+    save_tokenizer_for_auto_load,
+)
 
 
 DEFAULT_TRAIN_JSON = PROJECT_ROOT / "data" / "SCENIC_full_training_dataset.json"
@@ -287,14 +291,28 @@ def load_model_and_tokenizer(args: argparse.Namespace, model_path: str, state: D
         "trust_remote_code": args.trust_remote_code,
         "local_files_only": args.local_files_only,
     }
+    tokenizer_kwargs = dict(load_kwargs)
+    model_kwargs = dict(load_kwargs)
     if state.device.type == "cuda":
         if args.bf16:
-            load_kwargs["torch_dtype"] = torch.bfloat16
+            model_kwargs["torch_dtype"] = torch.bfloat16
         elif args.fp16:
-            load_kwargs["torch_dtype"] = torch.float16
+            model_kwargs["torch_dtype"] = torch.float16
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path, **load_kwargs)
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_path, **load_kwargs)
+    checkpoint_dir = Path(model_path).expanduser()
+    if checkpoint_dir.is_dir():
+        repair_tokenizer_files_for_auto_load(checkpoint_dir)
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_path, **tokenizer_kwargs)
+    except ValueError as exc:
+        if "tokenizersbackend" not in str(exc).replace("_", "").replace("-", "").lower():
+            raise
+        if checkpoint_dir.is_dir():
+            repair_tokenizer_files_for_auto_load(checkpoint_dir)
+        tokenizer = AutoTokenizer.from_pretrained(model_path, **tokenizer_kwargs)
+
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_path, **model_kwargs)
     if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
         tokenizer.pad_token = tokenizer.eos_token
     if hasattr(model.config, "use_cache"):
@@ -668,7 +686,7 @@ def run_pruning(
 
 def save_pruned_model(model: nn.Module, tokenizer: Any, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    tokenizer.save_pretrained(output_dir)
+    save_tokenizer_for_auto_load(tokenizer, output_dir)
     sanitize_model_for_save(model).save_pretrained(output_dir, safe_serialization=True)
 
 

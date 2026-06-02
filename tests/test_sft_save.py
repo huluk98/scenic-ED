@@ -16,6 +16,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 from scenic_train_chatlm_sft import (
     TripletSFTModule,
     model_for_save,
+    repair_tokenizer_files_for_auto_load,
     sanitize_config_for_json,
     sanitize_tokenizer_for_save,
 )
@@ -61,3 +62,40 @@ def test_sanitize_tokenizer_for_save_converts_init_kwargs_dtypes() -> None:
 
     assert tokenizer.init_kwargs == {"torch_dtype": "bfloat16"}
     json.dumps(tokenizer.init_kwargs)
+
+
+def test_repair_tokenizer_config_replaces_tokenizersbackend_from_source(tmp_path: Path) -> None:
+    source_dir = tmp_path / "base"
+    output_dir = tmp_path / "fine_tuned"
+    source_dir.mkdir()
+    output_dir.mkdir()
+    (source_dir / "tokenizer_config.json").write_text(
+        json.dumps({"tokenizer_class": "ChatLMTokenizer", "auto_map": {"AutoTokenizer": "tokenization_chatlm.ChatLMTokenizer"}}),
+        encoding="utf-8",
+    )
+    (source_dir / "tokenization_chatlm.py").write_text("# custom tokenizer\n", encoding="utf-8")
+    (output_dir / "tokenizer_config.json").write_text(
+        json.dumps({"tokenizer_class": "TokenizersBackend"}),
+        encoding="utf-8",
+    )
+
+    repair_tokenizer_files_for_auto_load(output_dir, source_dir=source_dir)
+
+    repaired = json.loads((output_dir / "tokenizer_config.json").read_text(encoding="utf-8"))
+    assert repaired["tokenizer_class"] == "ChatLMTokenizer"
+    assert (output_dir / "tokenization_chatlm.py").exists()
+
+
+def test_repair_tokenizer_config_removes_tokenizersbackend_without_source(tmp_path: Path) -> None:
+    output_dir = tmp_path / "fine_tuned"
+    output_dir.mkdir()
+    (output_dir / "tokenizer_config.json").write_text(
+        json.dumps({"tokenizer_class": "TokenizersBackend"}),
+        encoding="utf-8",
+    )
+
+    repair_tokenizer_files_for_auto_load(output_dir)
+
+    repaired = json.loads((output_dir / "tokenizer_config.json").read_text(encoding="utf-8"))
+    assert "tokenizer_class" not in repaired
+    assert repaired["_scenic_removed_tokenizer_class"] == "TokenizersBackend"
