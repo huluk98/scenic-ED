@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -258,7 +259,7 @@ def tokenize_targets(tokenizer: Any, targets: list[str], max_length: int) -> Any
     try:
         labels = tokenizer(
             text_target=targets,
-            padding=True,
+            padding="max_length",
             truncation=True,
             max_length=max_length,
             return_tensors="pt",
@@ -267,7 +268,7 @@ def tokenize_targets(tokenizer: Any, targets: list[str], max_length: int) -> Any
         with tokenizer.as_target_tokenizer():
             labels = tokenizer(
                 targets,
-                padding=True,
+                padding="max_length",
                 truncation=True,
                 max_length=max_length,
                 return_tensors="pt",
@@ -776,6 +777,39 @@ def make_plan_report(
     }
 
 
+def run_pruning_on_rank0_and_sync(
+    model: nn.Module,
+    tokenizer: Any,
+    calibration_records: list[dict[str, Any]],
+    args: argparse.Namespace,
+    state: DistributedState,
+    pruned_output_dir: Path,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    pruning_summary = None
+    pruned_model_summary = None
+    status: dict[str, Any] = {"ok": True, "error": None}
+
+    if state.is_main:
+        try:
+            rank0_print(state, f"Running {args.method} pruning at target sparsity {args.sparsity:.2f}")
+            pruning_summary = run_pruning(model, tokenizer, calibration_records, args, state)
+            pruned_model_summary = summarize_model(model, str(pruned_output_dir))
+            rank0_print(state, f"Saving pruned model to: {pruned_output_dir}")
+            save_pruned_model(model, tokenizer, pruned_output_dir)
+        except Exception:
+            status = {"ok": False, "error": traceback.format_exc()}
+
+    if state.enabled:
+        status_list = [status]
+        dist.broadcast_object_list(status_list, src=0)
+        status = status_list[0]
+
+    if not status["ok"]:
+        raise RuntimeError(f"Rank 0 failed during {args.method} pruning:\n{status['error']}")
+
+    return pruning_summary, pruned_model_summary
+
+
 def main() -> None:
     args = parse_args()
     if not 0.0 < args.sparsity < 1.0:
@@ -818,14 +852,14 @@ def main() -> None:
         original_results = evaluate_all(model, tokenizer, datasets, args, state, label="original")
 
         sync_distributed(state)
-        pruning_summary = None
-        pruned_model_summary = None
-        if state.is_main:
-            rank0_print(state, f"Running {args.method} pruning at target sparsity {args.sparsity:.2f}")
-            pruning_summary = run_pruning(model, tokenizer, calibration_records, args, state)
-            pruned_model_summary = summarize_model(model, str(pruned_output_dir))
-            rank0_print(state, f"Saving pruned model to: {pruned_output_dir}")
-            save_pruned_model(model, tokenizer, pruned_output_dir)
+        pruning_summary, pruned_model_summary = run_pruning_on_rank0_and_sync(
+            model,
+            tokenizer,
+            calibration_records,
+            args,
+            state,
+            pruned_output_dir,
+        )
 
         del model
         release_cuda_memory()

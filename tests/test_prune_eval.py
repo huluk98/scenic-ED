@@ -15,6 +15,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from aggregate_prune_eval_reports import build_aggregate_report
 from scenic_prune_eval import (
+    CalibrationDataset,
     DistributedState,
     compact_metrics,
     finalize_eval_result,
@@ -56,6 +57,32 @@ class TinySeq2Seq(torch.nn.Module):
         features = torch.nn.functional.one_hot(input_ids.clamp(max=3), num_classes=4).float()
         logits = self.linear(features)
         return SimpleNamespace(logits=logits, loss=logits.mean())
+
+
+class VariableLengthTargetTokenizer:
+    pad_token_id = 0
+
+    def __call__(
+        self,
+        texts=None,
+        text_target=None,
+        padding=True,
+        truncation=True,
+        max_length=8,
+        return_tensors=None,
+    ):
+        values = text_target if text_target is not None else texts
+        if isinstance(values, str):
+            values = [values]
+        batch_size = len(values)
+        if text_target is not None and padding != "max_length":
+            length = min(max(len(str(value)) for value in values), max_length)
+        else:
+            length = max_length
+        return {
+            "input_ids": torch.ones((batch_size, length), dtype=torch.long),
+            "attention_mask": torch.ones((batch_size, length), dtype=torch.long),
+        }
 
 
 def test_normalize_text_can_ignore_spaces() -> None:
@@ -147,6 +174,24 @@ def test_wanda_prune_sets_half_of_linear_weights_to_zero() -> None:
     assert summary["pruned_linear_layers"] == 1
     assert summary["skipped_linear_layers"] == 0
     assert int(model.linear.weight.eq(0).sum().item()) == 2
+
+
+def test_calibration_dataset_pads_variable_length_labels_for_collate() -> None:
+    dataset = CalibrationDataset(
+        records=[
+            {"prompt": "a", "response": "short"},
+            {"prompt": "b", "response": "much longer response"},
+        ],
+        tokenizer=VariableLengthTargetTokenizer(),
+        max_input_len=8,
+        max_target_len=16,
+    )
+    loader = torch.utils.data.DataLoader(dataset, batch_size=2, shuffle=False)
+
+    batch = next(iter(loader))
+
+    assert batch["input_ids"].shape == (2, 8)
+    assert batch["labels"].shape == (2, 16)
 
 
 def test_aggregate_prune_eval_reports_keeps_all_method_em_metrics(tmp_path: Path) -> None:
