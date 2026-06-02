@@ -618,13 +618,22 @@ def wanda_prune(
     state: DistributedState,
 ) -> dict[str, Any]:
     activation_stats: dict[nn.Linear, dict[str, Any]] = {}
+    module_names = {module: name for name, module in iter_linear_modules(model)}
+    skipped_non_tensor: set[nn.Linear] = set()
+    skipped_shape_mismatch: set[nn.Linear] = set()
     handles = []
 
     def hook(module: nn.Linear, inputs: tuple[Any, ...], _output: Any) -> None:
         if not inputs:
             return
+        if not torch.is_tensor(inputs[0]):
+            skipped_non_tensor.add(module)
+            return
         activation = inputs[0].detach()
         if activation.numel() == 0:
+            return
+        if activation.shape[-1] != module.weight.shape[1]:
+            skipped_shape_mismatch.add(module)
             return
         activation = activation.reshape(-1, activation.shape[-1]).float()
         stats = activation_stats.setdefault(
@@ -643,27 +652,44 @@ def wanda_prune(
     loader = make_calibration_loader(calibration_records, tokenizer, args)
     used_batches = 0
     model.eval()
-    with torch.no_grad():
-        for batch_index, batch in enumerate(tqdm(loader, desc="wanda calibration", disable=not state.is_main)):
-            if batch_index >= args.calibration_batches:
-                break
-            batch = move_batch_to_device(batch, state.device)
-            model(**batch, return_dict=True)
-            used_batches += 1
+    try:
+        with torch.no_grad():
+            for batch_index, batch in enumerate(tqdm(loader, desc="wanda calibration", disable=not state.is_main)):
+                if batch_index >= args.calibration_batches:
+                    break
+                batch = move_batch_to_device(batch, state.device)
+                model(**batch, return_dict=True)
+                used_batches += 1
+    finally:
+        for handle in handles:
+            handle.remove()
 
-    for handle in handles:
-        handle.remove()
-
+    skipped_prune_shape_mismatch: set[nn.Linear] = set()
+    pruned_layers = 0
     for module, stats in activation_stats.items():
-        activation_norm = stats["sum_sq"].sqrt()
+        count = max(1, int(stats["count"]))
+        activation_norm = torch.sqrt(stats["sum_sq"] / count)
+        activation_norm = torch.nan_to_num(activation_norm, nan=0.0, posinf=0.0, neginf=0.0)
+        if activation_norm.numel() != module.weight.shape[1]:
+            skipped_prune_shape_mismatch.add(module)
+            continue
+        activation_norm = activation_norm.to(module.weight.device)
         score = module.weight.data.abs().float() * activation_norm.unsqueeze(0)
         prune_by_score(module.weight.data, score, sparsity=args.sparsity, per_row=True)
+        pruned_layers += 1
+
+    skipped_modules = skipped_non_tensor | skipped_shape_mismatch | skipped_prune_shape_mismatch
     return {
         "method": "wanda",
         "sparsity": args.sparsity,
         "calibration_examples": min(len(calibration_records), used_batches * args.calibration_batch_size),
         "calibration_batches": used_batches,
-        "pruned_linear_layers": len(activation_stats),
+        "pruned_linear_layers": pruned_layers,
+        "skipped_linear_layers": len(skipped_modules),
+        "skipped_non_tensor_activation_layers": sorted(module_names.get(module, "<unnamed>") for module in skipped_non_tensor),
+        "skipped_shape_mismatch_layers": sorted(
+            module_names.get(module, "<unnamed>") for module in (skipped_shape_mismatch | skipped_prune_shape_mismatch)
+        ),
     }
 
 

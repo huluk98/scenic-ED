@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 import json
+from types import SimpleNamespace
 
 import torch
 
@@ -13,7 +14,48 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from aggregate_prune_eval_reports import build_aggregate_report
-from scenic_prune_eval import compact_metrics, finalize_eval_result, magnitude_prune, normalize_text, summarize_model
+from scenic_prune_eval import (
+    DistributedState,
+    compact_metrics,
+    finalize_eval_result,
+    magnitude_prune,
+    normalize_text,
+    summarize_model,
+    wanda_prune,
+)
+
+
+class FakeTokenizer:
+    pad_token_id = 0
+
+    def __call__(
+        self,
+        texts=None,
+        text_target=None,
+        padding=True,
+        truncation=True,
+        max_length=4,
+        return_tensors=None,
+    ):
+        values = text_target if text_target is not None else texts
+        if isinstance(values, str):
+            values = [values]
+        batch_size = len(values)
+        return {
+            "input_ids": torch.ones((batch_size, max_length), dtype=torch.long),
+            "attention_mask": torch.ones((batch_size, max_length), dtype=torch.long),
+        }
+
+
+class TinySeq2Seq(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.linear = torch.nn.Linear(4, 1, bias=False)
+
+    def forward(self, input_ids, attention_mask=None, labels=None, return_dict=True):
+        features = torch.nn.functional.one_hot(input_ids.clamp(max=3), num_classes=4).float()
+        logits = self.linear(features)
+        return SimpleNamespace(logits=logits, loss=logits.mean())
 
 
 def test_normalize_text_can_ignore_spaces() -> None:
@@ -79,6 +121,32 @@ def test_magnitude_prune_sets_half_of_linear_weights_to_zero() -> None:
     assert summary["pruned_linear_layers"] == 1
     assert after["linear_zero_weight_count"] == 4
     assert after["linear_sparsity"] == 0.5
+
+
+def test_wanda_prune_sets_half_of_linear_weights_to_zero() -> None:
+    model = TinySeq2Seq()
+    with torch.no_grad():
+        model.linear.weight.copy_(torch.arange(1, 5, dtype=torch.float32).reshape(1, 4))
+    args = SimpleNamespace(
+        max_input_len=4,
+        max_target_len=4,
+        calibration_batch_size=2,
+        calibration_batches=1,
+        sparsity=0.5,
+    )
+    state = DistributedState(enabled=False, rank=0, local_rank=0, world_size=1, device=torch.device("cpu"))
+
+    summary = wanda_prune(
+        model,
+        FakeTokenizer(),
+        [{"prompt": "turn on light", "response": "ok"}, {"prompt": "turn off light", "response": "ok"}],
+        args,
+        state,
+    )
+
+    assert summary["pruned_linear_layers"] == 1
+    assert summary["skipped_linear_layers"] == 0
+    assert int(model.linear.weight.eq(0).sum().item()) == 2
 
 
 def test_aggregate_prune_eval_reports_keeps_all_method_em_metrics(tmp_path: Path) -> None:
