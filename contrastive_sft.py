@@ -91,7 +91,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cache-dir", default=CACHE_DIR, help="Optional Hugging Face cache directory.")
     parser.add_argument(
         "--local-files-only",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=LOCAL_FILES_ONLY,
         help="Load model/tokenizer only from local files.",
     )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+import json
 
 import torch
 
@@ -11,6 +12,7 @@ SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+from aggregate_prune_eval_reports import build_aggregate_report
 from scenic_prune_eval import compact_metrics, finalize_eval_result, magnitude_prune, normalize_text, summarize_model
 
 
@@ -77,3 +79,78 @@ def test_magnitude_prune_sets_half_of_linear_weights_to_zero() -> None:
     assert summary["pruned_linear_layers"] == 1
     assert after["linear_zero_weight_count"] == 4
     assert after["linear_sparsity"] == 0.5
+
+
+def test_aggregate_prune_eval_reports_keeps_all_method_em_metrics(tmp_path: Path) -> None:
+    report_path = tmp_path / "magnitude.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "pruned_model_path": "runs/magnitude/pruned_model",
+                "datasets": {
+                    "benchmark": {"path": "benchmark.json", "total": 2},
+                    "training": {"path": "train.json", "total": 4},
+                },
+                "summary": {
+                    "original_before_prune": {
+                        "benchmark": {
+                            "total": 2,
+                            "em1": 0.5,
+                            "em5": 1.0,
+                            "em1_percent": 50.0,
+                            "em5_percent": 100.0,
+                            "accuracy": 0.5,
+                            "accuracy_percent": 50.0,
+                        },
+                        "training": {
+                            "total": 4,
+                            "em1": 0.75,
+                            "em5": 1.0,
+                            "em1_percent": 75.0,
+                            "em5_percent": 100.0,
+                            "accuracy": 0.75,
+                            "accuracy_percent": 75.0,
+                        },
+                    },
+                    "pruned_after_50_percent": {
+                        "benchmark": {
+                            "total": 2,
+                            "em1": 0.25,
+                            "em5": 0.5,
+                            "em1_percent": 25.0,
+                            "em5_percent": 50.0,
+                            "accuracy": 0.25,
+                            "accuracy_percent": 25.0,
+                        }
+                    },
+                },
+                "pruning": {"method": "magnitude", "sparsity": 0.5},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    aggregate = build_aggregate_report(
+        base_model="charent/ChatLM-mini-Chinese",
+        contrastive_model="runs/contrastive",
+        epochs=5,
+        sparsity=0.5,
+        method_reports=[("magnitude", report_path)],
+        contrastive_train_json="data/SCENIC_full_anchor_positive_negative.json",
+    )
+
+    assert aggregate["contrastive_epochs"] == 5
+    assert aggregate["methods"]["magnitude"]["original_before_prune"]["training"]["em1"] == 0.75
+    assert aggregate["methods"]["magnitude"]["pruned_after_50_percent"]["benchmark"]["em5"] == 0.5
+    assert {
+        "method": "magnitude",
+        "phase": "pruned_after_50_percent",
+        "dataset": "benchmark",
+        "total": 2,
+        "em1": 0.25,
+        "em5": 0.5,
+        "em1_percent": 25.0,
+        "em5_percent": 50.0,
+        "accuracy": 0.25,
+        "accuracy_percent": 25.0,
+    } in aggregate["table"]

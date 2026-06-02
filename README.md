@@ -226,3 +226,11 @@ bash scripts/run_prune_eval_50.sh models/chatlm_scenic_triplet_sft \
 ```
 
 `scripts/scenic_prune_eval.py` supports `magnitude`, `gradient`, `wanda`, and NVIDIA `2:4` pruning. The report stores `accuracy` as exact-match@1 so you can verify the checkpoint you passed in before comparing the pruned model.
+
+To run the full pipeline from the base ChatLM model in one command, use:
+
+```bash
+bash scripts/run_contrastive_5epoch_all_prune_50.sh charent/ChatLM-mini-Chinese
+```
+
+This trains contrastive triplet SFT for 5 epochs, then runs 50% `magnitude`, `wanda`, `gradient`, and NVIDIA `2:4` pruning. It writes one final JSON at `prune_eval_outputs/<run>/all_pruning_em_report.json` with benchmark and training-set EM@1/EM@5 for the original contrastive model and each pruned model. If you already have the base model downloaded locally, pass that directory or force offline loading with `LOCAL_FILES_ONLY=1`.
