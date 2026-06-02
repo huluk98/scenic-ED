@@ -196,7 +196,6 @@ def print_run_config(args: argparse.Namespace) -> None:
 def configure_runtime(args: argparse.Namespace) -> None:
     os.environ["SCENIC_DDP_TIMEOUT_MINUTES"] = str(args.ddp_timeout_minutes)
     os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
-    os.environ.setdefault("NCCL_ASYNC_ERROR_HANDLING", "1")
 
 
 def cleanup_runtime() -> None:
@@ -290,7 +289,8 @@ def main() -> None:
 
     try:
         output_dir = train_contrastive_triplet_sft(contrastive_config_from_args(args))
-        print(f"saved contrastive model to {output_dir}")
+        if int(os.environ.get("RANK", "0")) == 0:
+            print(f"saved contrastive model to {output_dir}")
     finally:
         cleanup_runtime()
 

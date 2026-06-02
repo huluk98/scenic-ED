@@ -13,7 +13,12 @@ SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from scenic_train_chatlm_sft import TripletSFTModule, model_for_save, sanitize_config_for_json
+from scenic_train_chatlm_sft import (
+    TripletSFTModule,
+    model_for_save,
+    sanitize_config_for_json,
+    sanitize_tokenizer_for_save,
+)
 
 
 class FakeSeq2SeqModel:
@@ -47,3 +52,12 @@ def test_sanitize_config_for_json_converts_torch_dtypes() -> None:
     assert config.nested == {"dtype": "float16"}
     assert config.dtypes == ["float32"]
     json.dumps(vars(config))
+
+
+def test_sanitize_tokenizer_for_save_converts_init_kwargs_dtypes() -> None:
+    tokenizer = SimpleNamespace(init_kwargs={"torch_dtype": torch.bfloat16})
+
+    sanitize_tokenizer_for_save(tokenizer)
+
+    assert tokenizer.init_kwargs == {"torch_dtype": "bfloat16"}
+    json.dumps(tokenizer.init_kwargs)

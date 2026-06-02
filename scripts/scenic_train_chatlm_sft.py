@@ -188,12 +188,18 @@ def setup_distributed() -> DistributedState:
         raise RuntimeError("Distributed training requires CUDA. Use a single-process CPU/MPS run instead.")
 
     os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
-    os.environ.setdefault("NCCL_ASYNC_ERROR_HANDLING", "1")
     timeout_minutes = int(os.environ.get("SCENIC_DDP_TIMEOUT_MINUTES", "10"))
     local_rank = int(os.environ["LOCAL_RANK"])
     rank = int(os.environ["RANK"])
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl", timeout=timedelta(minutes=timeout_minutes))
+    try:
+        dist.init_process_group(
+            backend="nccl",
+            timeout=timedelta(minutes=timeout_minutes),
+            device_id=torch.device("cuda", local_rank),
+        )
+    except TypeError:
+        dist.init_process_group(backend="nccl", timeout=timedelta(minutes=timeout_minutes))
     return DistributedState(enabled=True, rank=rank, local_rank=local_rank, world_size=world_size)
 
 
@@ -246,7 +252,10 @@ def sync_distributed(state: DistributedState) -> None:
         return
     import torch.distributed as dist
 
-    dist.barrier()
+    try:
+        dist.barrier(device_ids=[state.local_rank])
+    except TypeError:
+        dist.barrier()
 
 
 def rank0_print(state: DistributedState, message: str) -> None:
@@ -345,6 +354,19 @@ def sanitize_model_for_save(model: Any) -> Any:
     return model
 
 
+def sanitize_tokenizer_for_save(tokenizer: Any) -> Any:
+    for attr in ("init_kwargs", "special_tokens_map"):
+        value = getattr(tokenizer, attr, None)
+        if isinstance(value, dict):
+            safe_value = json_safe_value(value)
+            try:
+                setattr(tokenizer, attr, safe_value)
+            except AttributeError:
+                value.clear()
+                value.update(safe_value)
+    return tokenizer
+
+
 def load_chatlm_stack(config: RegularSFTConfig, state: DistributedState) -> tuple[Any, Any, Any]:
     if config.local_files_only:
         force_huggingface_offline()
@@ -359,25 +381,28 @@ def load_chatlm_stack(config: RegularSFTConfig, state: DistributedState) -> tupl
     }
     if config.cache_dir is not None:
         load_kwargs["cache_dir"] = str(config.cache_dir.expanduser())
+    tokenizer_kwargs = dict(load_kwargs)
+    model_kwargs = dict(load_kwargs)
     dtype = model_load_dtype(config, device)
     if dtype is not None:
-        load_kwargs["torch_dtype"] = dtype
+        model_kwargs["torch_dtype"] = dtype
 
     # In DDP, let rank 0 touch the network/cache first. Otherwise eight ranks can
     # simultaneously initialize Hugging Face HTTP clients and mutate the same cache.
     if state.enabled and not state.is_main and not config.local_files_only:
         sync_distributed(state)
-        load_kwargs["local_files_only"] = True
+        tokenizer_kwargs["local_files_only"] = True
+        model_kwargs["local_files_only"] = True
 
     rank0_print(state, f"Loading tokenizer from {config.model_name_or_path}...")
     try:
-        tokenizer = AutoTokenizer.from_pretrained(config.model_name_or_path, **load_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(config.model_name_or_path, **tokenizer_kwargs)
     except Exception as exc:
         raise_model_load_error(config, exc)
 
     rank0_print(state, f"Loading model from {config.model_name_or_path}...")
     try:
-        model = AutoModelForSeq2SeqLM.from_pretrained(config.model_name_or_path, **load_kwargs)
+        model = AutoModelForSeq2SeqLM.from_pretrained(config.model_name_or_path, **model_kwargs)
     except Exception as exc:
         raise_model_load_error(config, exc)
 
@@ -574,7 +599,7 @@ def autocast_context(config: RegularSFTConfig, device: Any) -> Any:
 
 def save_model(tokenizer: Any, model: Any, output_dir: Path, safe_serialization: bool = True) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    tokenizer.save_pretrained(output_dir)
+    sanitize_tokenizer_for_save(tokenizer).save_pretrained(output_dir)
     sanitize_model_for_save(model).save_pretrained(output_dir, safe_serialization=safe_serialization)
 
 
@@ -617,7 +642,7 @@ def save_final_rank0_after_training(
 
     rank0_print(state, f"Saving {label} to {output_dir}...")
     output_dir.mkdir(parents=True, exist_ok=True)
-    tokenizer.save_pretrained(output_dir)
+    sanitize_tokenizer_for_save(tokenizer).save_pretrained(output_dir)
     rank0_print(state, f"Tokenizer saved for {label}; saving model weights...")
     model_to_save.save_pretrained(output_dir, safe_serialization=safe_serialization)
     rank0_print(state, f"Finished saving {label}.")
