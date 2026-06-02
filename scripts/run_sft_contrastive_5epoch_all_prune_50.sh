@@ -4,21 +4,22 @@ set -euo pipefail
 usage() {
   cat >&2 <<'USAGE'
 Usage:
-  bash scripts/run_contrastive_5epoch_all_prune_50.sh <base-model-path-or-hf-id> [extra scenic_prune_eval.py args]
+  bash scripts/run_sft_contrastive_5epoch_all_prune_50.sh <base-model-path-or-hf-id> [extra scenic_prune_eval.py args]
 
 Example:
-  bash scripts/run_contrastive_5epoch_all_prune_50.sh charent/ChatLM-mini-Chinese
+  bash scripts/run_sft_contrastive_5epoch_all_prune_50.sh charent/ChatLM-mini-Chinese
 
 Useful env overrides:
   OUTPUT_ROOT=prune_eval_outputs/my_run
-  CONTRASTIVE_OUTPUT_DIR=models/chatlm_scenic_triplet_sft_5epoch
-  FINAL_JSON=prune_eval_outputs/my_run/all_pruning_em_report.json
+  FINAL_JSON=prune_eval_outputs/my_run/all_sft_contrastive_pruning_em_report.json
   NPROC_PER_NODE=8
   LOCAL_BASE_MODEL_DIR=prune_eval_outputs/my_run/base_model
-  LOCAL_FILES_ONLY=1        # force local/offline base model loading
-  LOCAL_FILES_ONLY=0        # allow Hugging Face base model loading
-  IGNORE_SPACES=1           # default for Chinese EM; set 0 for strict whitespace-sensitive EM
-  SKIP_TRAIN=1              # reuse CONTRASTIVE_OUTPUT_DIR and only prune/eval
+  LOCAL_FILES_ONLY=1       # force local/offline base model loading
+  LOCAL_FILES_ONLY=0       # allow Hugging Face base model loading
+  IGNORE_SPACES=1          # default for Chinese EM; set 0 for strict whitespace-sensitive EM
+  SKIP_TRAIN=1             # reuse both SFT checkpoints and only prune/eval
+  SKIP_REGULAR_TRAIN=1     # reuse regular SFT checkpoint
+  SKIP_CONTRASTIVE_TRAIN=1 # reuse contrastive SFT checkpoint
 USAGE
 }
 
@@ -44,6 +45,7 @@ cd "$(dirname "$0")/.."
 PYTHON="${PYTHON:-python}"
 EPOCHS="${EPOCHS:-5}"
 SPARSITY="${SPARSITY:-0.5}"
+REGULAR_TRAIN_JSON="${REGULAR_TRAIN_JSON:-data/SCENIC_full_training_dataset.json}"
 CONTRASTIVE_TRAIN_JSON="${CONTRASTIVE_TRAIN_JSON:-data/SCENIC_full_anchor_positive_negative.json}"
 EVAL_TRAIN_JSON="${EVAL_TRAIN_JSON:-data/SCENIC_full_training_dataset.json}"
 BENCHMARK_JSON="${BENCHMARK_JSON:-generated/iot_instruction_benchmark_200.json}"
@@ -53,10 +55,11 @@ RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 SAFE_BASE="$(basename "$BASE_MODEL" | tr -c 'A-Za-z0-9_.-' '_')"
 SAFE_BASE="${SAFE_BASE%_}"
 SAFE_BASE="${SAFE_BASE:-chatlm}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-prune_eval_outputs/${SAFE_BASE}_contrastive5_all50_${RUN_ID}}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-prune_eval_outputs/${SAFE_BASE}_sft_contrastive5_all50_${RUN_ID}}"
 LOCAL_BASE_MODEL_DIR="${LOCAL_BASE_MODEL_DIR:-${OUTPUT_ROOT}/base_model}"
+REGULAR_OUTPUT_DIR="${REGULAR_OUTPUT_DIR:-${OUTPUT_ROOT}/regular_sft_5epoch}"
 CONTRASTIVE_OUTPUT_DIR="${CONTRASTIVE_OUTPUT_DIR:-${OUTPUT_ROOT}/contrastive_sft_5epoch}"
-FINAL_JSON="${FINAL_JSON:-${OUTPUT_ROOT}/all_pruning_em_report.json}"
+FINAL_JSON="${FINAL_JSON:-${OUTPUT_ROOT}/all_sft_contrastive_pruning_em_report.json}"
 IGNORE_SPACES="${IGNORE_SPACES:-1}"
 
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-8}"
@@ -148,7 +151,7 @@ else
   TRAIN_LOCAL_ARGS+=(--no-local-files-only)
 fi
 
-mkdir -p "$OUTPUT_ROOT"
+PRECISION_ARGS=(--bf16)
 
 EVAL_EXTRA_ARGS=(
   --train-json "$EVAL_TRAIN_JSON"
@@ -168,18 +171,45 @@ case "$IGNORE_SPACES" in
     ;;
 esac
 
+mkdir -p "$OUTPUT_ROOT"
+
 echo "Base model: $BASE_MODEL"
 echo "Training model path: $TRAIN_MODEL"
-echo "Contrastive output: $CONTRASTIVE_OUTPUT_DIR"
-echo "Final all-method JSON: $FINAL_JSON"
+echo "Regular SFT output: $REGULAR_OUTPUT_DIR"
+echo "Contrastive SFT output: $CONTRASTIVE_OUTPUT_DIR"
+echo "Final all-model JSON: $FINAL_JSON"
 echo "NPROC_PER_NODE: $NPROC_PER_NODE"
 echo "LOCAL_FILES_ONLY for base model: $USE_LOCAL_FILES_ONLY"
+echo "Regular train data: $REGULAR_TRAIN_JSON"
 echo "Contrastive train data: $CONTRASTIVE_TRAIN_JSON"
 echo "Eval train data: $EVAL_TRAIN_JSON"
 echo "Benchmark data: $BENCHMARK_JSON"
 echo "Ignore whitespace in Chinese exact-match eval: $IGNORE_SPACES"
 
-TRAIN_ARGS=(
+REGULAR_TRAIN_ARGS=(
+  scripts/scenic_train_chatlm_sft.py
+  --mode regular
+  --model "$TRAIN_MODEL"
+  --train-json "$REGULAR_TRAIN_JSON"
+  --output-dir "$REGULAR_OUTPUT_DIR"
+  --epochs "$EPOCHS"
+  --batch-size "$TRAIN_BATCH_SIZE"
+  --gradient-accumulation-steps "$TRAIN_GRADIENT_ACCUMULATION_STEPS"
+  --learning-rate "$TRAIN_LEARNING_RATE"
+  --weight-decay "$TRAIN_WEIGHT_DECAY"
+  --warmup-ratio "$TRAIN_WARMUP_RATIO"
+  --max-source-length "$TRAIN_MAX_SOURCE_LENGTH"
+  --max-target-length "$TRAIN_MAX_TARGET_LENGTH"
+  --num-workers "$TRAIN_NUM_WORKERS"
+  --ddp-timeout-minutes "$DDP_TIMEOUT_MINUTES"
+  --no-epoch-checkpoints
+  --final-save-on-cpu
+  --safe-serialization
+  "${PRECISION_ARGS[@]}"
+  "${TRAIN_LOCAL_ARGS[@]}"
+)
+
+CONTRASTIVE_TRAIN_ARGS=(
   contrastive_sft.py
   --model "$TRAIN_MODEL"
   --train-json "$CONTRASTIVE_TRAIN_JSON"
@@ -201,64 +231,92 @@ TRAIN_ARGS=(
   --no-epoch-checkpoints
   --final-save-on-cpu
   --safe-serialization
+  "${PRECISION_ARGS[@]}"
   "${TRAIN_LOCAL_ARGS[@]}"
 )
 
-if [[ "${SKIP_TRAIN:-0}" == "1" ]]; then
-  echo "SKIP_TRAIN=1; reusing contrastive checkpoint: $CONTRASTIVE_OUTPUT_DIR"
+if [[ "${SKIP_TRAIN:-0}" == "1" || "${SKIP_REGULAR_TRAIN:-0}" == "1" ]]; then
+  echo "Reusing regular SFT checkpoint: $REGULAR_OUTPUT_DIR"
+else
+  echo "Training 5-epoch regular SFT..."
+  if [[ "$NPROC_PER_NODE" -gt 1 ]]; then
+    torchrun --standalone --nproc_per_node="$NPROC_PER_NODE" "${REGULAR_TRAIN_ARGS[@]}"
+  else
+    "$PYTHON" "${REGULAR_TRAIN_ARGS[@]}"
+  fi
+fi
+
+if [[ "${SKIP_TRAIN:-0}" == "1" || "${SKIP_CONTRASTIVE_TRAIN:-0}" == "1" ]]; then
+  echo "Reusing contrastive SFT checkpoint: $CONTRASTIVE_OUTPUT_DIR"
 else
   echo "Training 5-epoch contrastive SFT..."
   if [[ "$NPROC_PER_NODE" -gt 1 ]]; then
-    torchrun --standalone --nproc_per_node="$NPROC_PER_NODE" "${TRAIN_ARGS[@]}"
+    torchrun --standalone --nproc_per_node="$NPROC_PER_NODE" "${CONTRASTIVE_TRAIN_ARGS[@]}"
   else
-    "$PYTHON" "${TRAIN_ARGS[@]}" --allow-single-gpu
+    "$PYTHON" "${CONTRASTIVE_TRAIN_ARGS[@]}" --allow-single-gpu
   fi
 fi
 
 if [[ -d "$TRAIN_MODEL" ]]; then
   "$PYTHON" scripts/repair_checkpoint_tokenizer.py \
+    --checkpoint "$REGULAR_OUTPUT_DIR" \
+    --source-tokenizer "$TRAIN_MODEL"
+  "$PYTHON" scripts/repair_checkpoint_tokenizer.py \
     --checkpoint "$CONTRASTIVE_OUTPUT_DIR" \
     --source-tokenizer "$TRAIN_MODEL"
 fi
 
-AGG_REPORT_ARGS=()
-for METHOD_LABEL in $PRUNE_METHODS; do
-  case "$METHOD_LABEL" in
-    nvidia|nvidia24|2of4|2:4)
-      METHOD_ARG="nvidia"
-      METHOD_KEY="nvidia24"
-      ;;
-    magnitude|gradient|wanda)
-      METHOD_ARG="$METHOD_LABEL"
-      METHOD_KEY="$METHOD_LABEL"
-      ;;
-    *)
-      echo "Unknown PRUNE_METHODS entry: $METHOD_LABEL" >&2
-      exit 2
-      ;;
-  esac
+MULTI_AGG_ARGS=(
+  --model "regular_sft=${REGULAR_OUTPUT_DIR}"
+  --model "contrastive_sft=${CONTRASTIVE_OUTPUT_DIR}"
+  --train-json "regular_sft=${REGULAR_TRAIN_JSON}"
+  --train-json "contrastive_sft=${CONTRASTIVE_TRAIN_JSON}"
+)
 
-  METHOD_RUN_DIR="${OUTPUT_ROOT}/${METHOD_KEY}_50"
-  METHOD_REPORT_JSON="${METHOD_RUN_DIR}/prune_eval_report.json"
-  METHOD_PRUNED_DIR="${METHOD_RUN_DIR}/pruned_model"
-  echo "Running ${METHOD_KEY} 50% prune/eval..."
-  METHOD="$METHOD_ARG" \
-    SPARSITY="$SPARSITY" \
-    RUN_DIR="$METHOD_RUN_DIR" \
-    REPORT_JSON="$METHOD_REPORT_JSON" \
-    PRUNED_DIR="$METHOD_PRUNED_DIR" \
-    NPROC_PER_NODE="$NPROC_PER_NODE" \
-    bash scripts/run_prune_eval_50.sh "$CONTRASTIVE_OUTPUT_DIR" "${EVAL_EXTRA_ARGS[@]}"
-  AGG_REPORT_ARGS+=(--report "${METHOD_KEY}=${METHOD_REPORT_JSON}")
-done
+run_prune_suite() {
+  local model_label="$1"
+  local model_dir="$2"
+  for METHOD_LABEL in $PRUNE_METHODS; do
+    local METHOD_ARG
+    local METHOD_KEY
+    case "$METHOD_LABEL" in
+      nvidia|nvidia24|2of4|2:4)
+        METHOD_ARG="nvidia"
+        METHOD_KEY="nvidia24"
+        ;;
+      magnitude|gradient|wanda)
+        METHOD_ARG="$METHOD_LABEL"
+        METHOD_KEY="$METHOD_LABEL"
+        ;;
+      *)
+        echo "Unknown PRUNE_METHODS entry: $METHOD_LABEL" >&2
+        exit 2
+        ;;
+    esac
 
-"$PYTHON" scripts/aggregate_prune_eval_reports.py \
+    local METHOD_RUN_DIR="${OUTPUT_ROOT}/${model_label}/${METHOD_KEY}_50"
+    local METHOD_REPORT_JSON="${METHOD_RUN_DIR}/prune_eval_report.json"
+    local METHOD_PRUNED_DIR="${METHOD_RUN_DIR}/pruned_model"
+    echo "Running ${model_label} ${METHOD_KEY} 50% prune/eval..."
+    METHOD="$METHOD_ARG" \
+      SPARSITY="$SPARSITY" \
+      RUN_DIR="$METHOD_RUN_DIR" \
+      REPORT_JSON="$METHOD_REPORT_JSON" \
+      PRUNED_DIR="$METHOD_PRUNED_DIR" \
+      NPROC_PER_NODE="$NPROC_PER_NODE" \
+      bash scripts/run_prune_eval_50.sh "$model_dir" "${EVAL_EXTRA_ARGS[@]}"
+    MULTI_AGG_ARGS+=(--report "${model_label}:${METHOD_KEY}=${METHOD_REPORT_JSON}")
+  done
+}
+
+run_prune_suite "regular_sft" "$REGULAR_OUTPUT_DIR"
+run_prune_suite "contrastive_sft" "$CONTRASTIVE_OUTPUT_DIR"
+
+"$PYTHON" scripts/aggregate_multi_model_prune_eval_reports.py \
   --output-json "$FINAL_JSON" \
   --base-model "$BASE_MODEL" \
-  --contrastive-model "$CONTRASTIVE_OUTPUT_DIR" \
-  --contrastive-train-json "$CONTRASTIVE_TRAIN_JSON" \
   --epochs "$EPOCHS" \
   --sparsity "$SPARSITY" \
-  "${AGG_REPORT_ARGS[@]}"
+  "${MULTI_AGG_ARGS[@]}"
 
-echo "Done. All EM@1/EM@5 results are in: $FINAL_JSON"
+echo "Done. Regular + contrastive EM@1/EM@5 results are in: $FINAL_JSON"

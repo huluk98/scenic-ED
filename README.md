@@ -235,6 +235,16 @@ bash scripts/run_contrastive_5epoch_all_prune_50.sh charent/ChatLM-mini-Chinese
 
 This trains contrastive triplet SFT for 5 epochs, then runs 50% `magnitude`, `wanda`, `gradient`, and NVIDIA `2:4` pruning. It writes one final JSON at `prune_eval_outputs/<run>/all_pruning_em_report.json` with benchmark and training-set EM@1/EM@5 for the original contrastive model and each pruned model. If you already have the base model downloaded locally, pass that directory or force offline loading with `LOCAL_FILES_ONLY=1`.
 
+To train and compare both regular SFT and contrastive SFT from the same original ChatLM Hugging Face id, use:
+
+```bash
+bash scripts/run_sft_contrastive_5epoch_all_prune_50.sh charent/ChatLM-mini-Chinese
+```
+
+This uses `data/SCENIC_full_training_dataset.json` for regular SFT and evaluation, `data/SCENIC_full_anchor_positive_negative.json` for contrastive SFT, and `generated/iot_instruction_benchmark_200.json` for benchmark EM. It writes one combined JSON at `prune_eval_outputs/<run>/all_sft_contrastive_pruning_em_report.json`.
+
+For Chinese command responses, the launcher uses whitespace-insensitive exact match by default (`IGNORE_SPACES=1`) so tokenizer-inserted spaces do not count as wrong actions. Set `IGNORE_SPACES=0` if you need strict string equality.
+
 When you pass the Hugging Face id directly, the launcher first downloads it into the run directory and trains from that local copy. This preserves the original tokenizer assets for pruning reloads and avoids fast-tokenizer backend errors such as `TokenizersBackend` or `argument 'vocab': 'dict' object cannot be converted to 'Sequence'`.
 
 If the per-method outputs already exist and you only need to merge them into one JSON, run:

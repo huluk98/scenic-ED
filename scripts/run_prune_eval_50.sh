@@ -14,6 +14,7 @@ cd "$(dirname "$0")/.."
 
 METHOD="${METHOD:-magnitude}"
 SPARSITY="${SPARSITY:-0.5}"
+IGNORE_SPACES="${IGNORE_SPACES:-0}"
 SAFE_MODEL_NAME="$(basename "$MODEL_PATH" | tr -c 'A-Za-z0-9_.-' '_')"
 SAFE_MODEL_NAME="${SAFE_MODEL_NAME%_}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-prune_eval_outputs}"
@@ -57,6 +58,18 @@ COMMON_ARGS=(
   --method "$METHOD"
   --sparsity "$SPARSITY"
 )
+
+case "$IGNORE_SPACES" in
+  1|true|TRUE|yes|YES)
+    COMMON_ARGS+=(--ignore-spaces)
+    ;;
+  0|false|FALSE|no|NO)
+    ;;
+  *)
+    echo "IGNORE_SPACES must be 1 or 0." >&2
+    exit 2
+    ;;
+esac
 
 if [[ "$USER_SET_PRUNED_DIR" -eq 0 ]]; then
   COMMON_ARGS+=(--pruned-output-dir "$PRUNED_DIR")

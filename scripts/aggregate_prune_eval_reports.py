@@ -36,6 +36,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sparsity", type=float, default=0.5)
     parser.add_argument("--contrastive-train-json", default=None)
     parser.add_argument("--report", action="append", default=[], help="Method report in method=/path/report.json form.")
+    parser.add_argument(
+        "--diagnostic-examples",
+        type=int,
+        default=5,
+        help="Number of first EM@1 mismatch examples to keep per method/phase/dataset when predictions are present.",
+    )
     return parser.parse_args()
 
 
@@ -135,6 +141,86 @@ def compact_dataset_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def normalize_text(text: Any, ignore_spaces: bool = False) -> str:
+    value = str(text).strip()
+    if ignore_spaces:
+        value = "".join(value.split())
+    return value
+
+
+def prediction_diagnostics(metrics: dict[str, Any], limit: int) -> dict[str, Any]:
+    outputs = metrics.get("outputs")
+    if not isinstance(outputs, list):
+        return {"outputs_available": False}
+
+    total = len(outputs)
+    em1_ignore_spaces = 0
+    em5_ignore_spaces = 0
+    blank_em1_predictions = 0
+    total_target_chars = 0
+    total_prediction_chars = 0
+    prediction_longer_than_target = 0
+    first_mismatches: list[dict[str, Any]] = []
+    top_predictions: dict[str, int] = {}
+
+    for item in outputs:
+        if not isinstance(item, dict):
+            continue
+        target = item.get("target", "")
+        em1_prediction = item.get("em1_prediction", "")
+        em5_predictions = item.get("em5_predictions", [])
+        if not isinstance(em5_predictions, list):
+            em5_predictions = []
+
+        target_text = normalize_text(target)
+        prediction_text = normalize_text(em1_prediction)
+        total_target_chars += len(target_text)
+        total_prediction_chars += len(prediction_text)
+        if len(prediction_text) > len(target_text):
+            prediction_longer_than_target += 1
+
+        gold_no_space = normalize_text(target, ignore_spaces=True)
+        pred_no_space = normalize_text(em1_prediction, ignore_spaces=True)
+        em5_no_space = [normalize_text(prediction, ignore_spaces=True) for prediction in em5_predictions]
+        if pred_no_space == gold_no_space:
+            em1_ignore_spaces += 1
+        if gold_no_space in em5_no_space:
+            em5_ignore_spaces += 1
+        if not normalize_text(em1_prediction):
+            blank_em1_predictions += 1
+
+        prediction_key = prediction_text
+        top_predictions[prediction_key] = top_predictions.get(prediction_key, 0) + 1
+
+        if len(first_mismatches) < limit and not item.get("em1_correct", False):
+            first_mismatches.append(
+                {
+                    "index": item.get("index"),
+                    "prompt": item.get("prompt"),
+                    "target": target,
+                    "em1_prediction": em1_prediction,
+                    "em1_matches_if_spaces_ignored": pred_no_space == gold_no_space,
+                }
+            )
+
+    top_em1_predictions = sorted(top_predictions.items(), key=lambda pair: pair[1], reverse=True)[:10]
+    return {
+        "outputs_available": True,
+        "total_outputs": total,
+        "em1_if_spaces_ignored": em1_ignore_spaces / total if total else 0.0,
+        "em5_if_spaces_ignored": em5_ignore_spaces / total if total else 0.0,
+        "blank_em1_predictions": blank_em1_predictions,
+        "blank_em1_prediction_rate": blank_em1_predictions / total if total else 0.0,
+        "avg_target_chars": total_target_chars / total if total else 0.0,
+        "avg_em1_prediction_chars": total_prediction_chars / total if total else 0.0,
+        "em1_prediction_longer_than_target_rate": prediction_longer_than_target / total if total else 0.0,
+        "top_em1_predictions": [
+            {"prediction": prediction, "count": count} for prediction, count in top_em1_predictions
+        ],
+        "first_em1_mismatches": first_mismatches,
+    }
+
+
 def report_phase_metrics(report: dict[str, Any], phase: str) -> dict[str, Any]:
     summary = report.get("summary", {})
     if not isinstance(summary, dict):
@@ -151,6 +237,7 @@ def build_aggregate_report(
     sparsity: float,
     method_reports: list[tuple[str, Path]],
     contrastive_train_json: str | None = None,
+    diagnostic_examples: int = 5,
 ) -> dict[str, Any]:
     if not method_reports:
         raise ValueError("At least one method report is required.")
@@ -165,10 +252,22 @@ def build_aggregate_report(
             first_report = report
 
         method_summary: dict[str, Any] = {}
+        diagnostics: dict[str, Any] = {}
         for phase in PHASES:
             phase_metrics = compact_dataset_metrics(report_phase_metrics(report, phase))
             method_summary[phase] = phase_metrics
+            full_phase = report.get(phase, {})
+            full_evaluations = full_phase.get("evaluations", {}) if isinstance(full_phase, dict) else {}
+            phase_diagnostics: dict[str, Any] = {}
             for dataset, metrics in phase_metrics.items():
+                full_dataset_metrics = (
+                    full_evaluations.get(dataset, {}) if isinstance(full_evaluations, dict) else {}
+                )
+                if isinstance(full_dataset_metrics, dict):
+                    phase_diagnostics[dataset] = prediction_diagnostics(
+                        full_dataset_metrics,
+                        limit=diagnostic_examples,
+                    )
                 table.append(
                     {
                         "method": method,
@@ -183,11 +282,14 @@ def build_aggregate_report(
                         "accuracy_percent": metrics["accuracy_percent"],
                     }
                 )
+            diagnostics[phase] = phase_diagnostics
 
         methods[method] = {
             "report_json": str(report_path),
             "pruned_model_path": report.get("pruned_model_path"),
+            "generation": report.get("generation", {}),
             "pruning": report.get("pruning", {}),
+            "diagnostics": diagnostics,
             **method_summary,
         }
 
@@ -202,6 +304,7 @@ def build_aggregate_report(
         "contrastive_epochs": epochs,
         "target_sparsity": sparsity,
         "accuracy_definition": "accuracy is exact-match@1 / EM@1",
+        "generation": first_report.get("generation", {}),
         "datasets": first_report.get("datasets", {}),
         "original_before_prune": top_level_original,
         "methods": methods,
@@ -236,6 +339,7 @@ def main() -> None:
         epochs=args.epochs,
         sparsity=args.sparsity if args.sparsity is not None else float(inferred["sparsity"] or 0.5),
         method_reports=method_reports,
+        diagnostic_examples=args.diagnostic_examples,
     )
     write_json(output_json, aggregate)
     print(f"Wrote all-method prune/eval JSON: {output_json}")
