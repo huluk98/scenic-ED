@@ -229,6 +229,8 @@ bash scripts/run_prune_eval_50.sh models/chatlm_scenic_triplet_sft \
 
 By default, the prune/eval launchers now use `SPARSITY_BASIS=full-model` and `PRUNE_SCOPE=all-linear`, so `SPARSITY=0.5` targets 50% sparsity across the whole loaded checkpoint, not only the selected encoder weights. For the older reference-style encoder-only run, set `SPARSITY_BASIS=targeted-linear PRUNE_SCOPE=encoder-linear`.
 
+For unstructured `magnitude`, `gradient`, and `wanda`, pruning is global across the selected weights: one layer can be pruned less and another more as long as the whole checkpoint reaches the target sparsity. NVIDIA `2:4` remains structured by definition, so eligible linear weights are pruned with the 2-of-4 pattern and any needed full-model correction is reported separately.
+
 The all-in-one launchers run this sparsity check automatically at the end and write `sparsity_check.json` in the run directory. To verify a run manually, use:
 
 ```bash
