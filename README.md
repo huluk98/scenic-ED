@@ -227,7 +227,7 @@ bash scripts/run_prune_eval_50.sh models/chatlm_scenic_triplet_sft \
 
 `scripts/scenic_prune_eval.py` supports `magnitude`, `gradient`, `wanda`, and NVIDIA `2:4` pruning. The report stores `accuracy` as exact-match@1 so you can verify the checkpoint you passed in before comparing the pruned model.
 
-By default, the prune/eval launchers use `PRUNE_SCOPE=encoder-linear`, matching the reference pruning runs that prune only encoder linear layers and leave decoder/output layers intact. Set `PRUNE_SCOPE=all-linear` only when you intentionally want the much harsher encoder+decoder pruning experiment.
+By default, the prune/eval launchers now use `SPARSITY_BASIS=full-model` and `PRUNE_SCOPE=all-linear`, so `SPARSITY=0.5` targets 50% sparsity across the whole loaded checkpoint, not only the selected encoder weights. For the older reference-style encoder-only run, set `SPARSITY_BASIS=targeted-linear PRUNE_SCOPE=encoder-linear`.
 
 After a run finishes, verify both full-model and targeted linear sparsity with:
 
@@ -237,7 +237,7 @@ python scripts/check_pruned_model_sparsity.py \
   --output-json prune_eval_outputs/<run>/sparsity_check.json
 ```
 
-For encoder-only pruning, `expected_scope_is_50_percent_sparse` should be true, while `full_model_is_50_percent_sparse` will usually be false because decoder/output parameters are intentionally left dense.
+For the new full-model runs, `full_model_is_50_percent_sparse` should be true. For encoder-only reference runs, `expected_scope_is_50_percent_sparse` may be true while `full_model_is_50_percent_sparse` is false because decoder/output parameters are intentionally left dense.
 
 To inspect active/nonzero parameters for one model path directly:
 

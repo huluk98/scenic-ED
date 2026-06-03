@@ -18,7 +18,8 @@ Useful env overrides:
   LOCAL_FILES_ONLY=1        # force local/offline base model loading
   LOCAL_FILES_ONLY=0        # allow Hugging Face base model loading
   IGNORE_SPACES=1           # default for Chinese EM; set 0 for strict whitespace-sensitive EM
-  PRUNE_SCOPE=encoder-linear # default to match reference pruning runs
+  PRUNE_SCOPE=all-linear      # default for true full-model 50% sparsity
+  SPARSITY_BASIS=full-model   # default: make the whole checkpoint 50% sparse
   SKIP_TRAIN=1              # reuse CONTRASTIVE_OUTPUT_DIR and only prune/eval
 USAGE
 }
@@ -33,8 +34,8 @@ shift
 
 for arg in "$@"; do
   case "$arg" in
-    --model|--model=*|--method|--method=*|--sparsity|--sparsity=*|--output-json|--output-json=*|--pruned-output-dir|--pruned-output-dir=*)
-      echo "This launcher controls model, method, sparsity, output-json, and pruned-output-dir. Use env overrides instead of: $arg" >&2
+    --model|--model=*|--method|--method=*|--sparsity|--sparsity=*|--sparsity-basis|--sparsity-basis=*|--output-json|--output-json=*|--pruned-output-dir|--pruned-output-dir=*)
+      echo "This launcher controls model, method, sparsity, sparsity-basis, output-json, and pruned-output-dir. Use env overrides instead of: $arg" >&2
       exit 2
       ;;
   esac
@@ -50,7 +51,8 @@ EVAL_TRAIN_JSON="${EVAL_TRAIN_JSON:-data/SCENIC_full_training_dataset.json}"
 BENCHMARK_JSON="${BENCHMARK_JSON:-generated/iot_instruction_benchmark_200.json}"
 CALIBRATION_JSON="${CALIBRATION_JSON:-$EVAL_TRAIN_JSON}"
 PRUNE_METHODS="${PRUNE_METHODS:-magnitude wanda gradient nvidia24}"
-PRUNE_SCOPE="${PRUNE_SCOPE:-encoder-linear}"
+PRUNE_SCOPE="${PRUNE_SCOPE:-all-linear}"
+SPARSITY_BASIS="${SPARSITY_BASIS:-full-model}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 SAFE_BASE="$(basename "$BASE_MODEL" | tr -c 'A-Za-z0-9_.-' '_')"
 SAFE_BASE="${SAFE_BASE%_}"
@@ -181,6 +183,7 @@ echo "Eval train data: $EVAL_TRAIN_JSON"
 echo "Benchmark data: $BENCHMARK_JSON"
 echo "Ignore whitespace in Chinese exact-match eval: $IGNORE_SPACES"
 echo "Prune scope: $PRUNE_SCOPE"
+echo "Sparsity basis: $SPARSITY_BASIS"
 
 TRAIN_ARGS=(
   contrastive_sft.py
@@ -252,6 +255,7 @@ for METHOD_LABEL in $PRUNE_METHODS; do
     PRUNED_DIR="$METHOD_PRUNED_DIR" \
     NPROC_PER_NODE="$NPROC_PER_NODE" \
     PRUNE_SCOPE="$PRUNE_SCOPE" \
+    SPARSITY_BASIS="$SPARSITY_BASIS" \
     bash scripts/run_prune_eval_50.sh "$CONTRASTIVE_OUTPUT_DIR" "${EVAL_EXTRA_ARGS[@]}"
   AGG_REPORT_ARGS+=(--report "${METHOD_KEY}=${METHOD_REPORT_JSON}")
 done

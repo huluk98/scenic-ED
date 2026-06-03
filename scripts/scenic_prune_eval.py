@@ -102,12 +102,27 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model", required=True, help="Regular SFT or contrastive SFT model path.")
     parser.add_argument("--method", choices=("magnitude", "gradient", "wanda", "nvidia"), default="magnitude")
-    parser.add_argument("--sparsity", type=float, default=0.5, help="Unstructured sparsity for magnitude/gradient/WANDA.")
+    parser.add_argument("--sparsity", type=float, default=0.5, help="Requested sparsity.")
+    parser.add_argument(
+        "--sparsity-basis",
+        choices=("full-model", "targeted-linear"),
+        default="full-model",
+        help=(
+            "Use full-model to make the whole checkpoint reach --sparsity. "
+            "Use targeted-linear for the older behavior where --sparsity applies only to selected linear weights."
+        ),
+    )
     parser.add_argument(
         "--prune-scope",
         choices=("encoder-linear", "decoder-linear", "all-linear"),
-        default="encoder-linear",
-        help="Linear module scope to prune. Defaults to encoder-linear to match the reference pruning runs.",
+        default="all-linear",
+        help="Linear module scope to prune. Defaults to all-linear so full-model sparsity can reach 50 percent.",
+    )
+    parser.add_argument(
+        "--full-model-correction",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="For structured NVIDIA 2:4 pruning, magnitude-prune non-2:4 parameters as needed to hit full-model sparsity.",
     )
     parser.add_argument("--train-json", default=str(DEFAULT_TRAIN_JSON))
     parser.add_argument("--benchmark-json", default=str(DEFAULT_BENCHMARK_JSON))
@@ -382,14 +397,42 @@ def summarize_linear_scope(model: nn.Module, prune_scope: str) -> dict[str, Any]
     }
 
 
+def count_parameter_tensors(tensors: list[torch.Tensor]) -> dict[str, int]:
+    total = 0
+    zero = 0
+    seen: set[int] = set()
+    for tensor in tensors:
+        tensor_id = id(tensor)
+        if tensor_id in seen:
+            continue
+        seen.add(tensor_id)
+        detached = tensor.detach()
+        total += detached.numel()
+        zero += int(detached.eq(0).sum().item())
+    return {
+        "parameter_count": total,
+        "zero_parameter_count": zero,
+        "active_parameter_count": total - zero,
+    }
+
+
+def summarize_parameter_sparsity(model: nn.Module) -> dict[str, Any]:
+    counts = count_parameter_tensors(list(model.parameters()))
+    total = counts["parameter_count"]
+    zero = counts["zero_parameter_count"]
+    return {
+        **counts,
+        "parameter_sparsity": zero / total if total else 0.0,
+    }
+
+
 def summarize_model(model: nn.Module, model_path: str) -> dict[str, Any]:
-    total_params = 0
+    parameter_sparsity = summarize_parameter_sparsity(model)
     trainable_params = 0
     linear_total = 0
     linear_zero = 0
     linear_layers = 0
     for parameter in model.parameters():
-        total_params += parameter.numel()
         if parameter.requires_grad:
             trainable_params += parameter.numel()
     for _, module in iter_linear_modules(model):
@@ -402,7 +445,7 @@ def summarize_model(model: nn.Module, model_path: str) -> dict[str, Any]:
         "model_path": model_path,
         "architectures": getattr(config, "architectures", None),
         "model_type": getattr(config, "model_type", None),
-        "parameter_count": total_params,
+        **parameter_sparsity,
         "trainable_parameter_count": trainable_params,
         "linear_layer_count": linear_layers,
         "linear_weight_count": linear_total,
@@ -556,9 +599,10 @@ def evaluate_dataset(
 
 
 def prune_by_score(weight: torch.Tensor, score: torch.Tensor, sparsity: float, per_row: bool) -> None:
+    sparsity = max(0.0, min(1.0, float(sparsity)))
     with torch.no_grad():
         if per_row:
-            keep = int(weight.shape[1] * (1.0 - sparsity))
+            keep = int(round(weight.shape[1] * (1.0 - sparsity)))
             if keep <= 0:
                 weight.zero_()
                 return
@@ -571,7 +615,7 @@ def prune_by_score(weight: torch.Tensor, score: torch.Tensor, sparsity: float, p
             return
 
         flat_score = score.float().reshape(-1)
-        keep = int(flat_score.numel() * (1.0 - sparsity))
+        keep = int(round(flat_score.numel() * (1.0 - sparsity)))
         if keep <= 0:
             weight.zero_()
             return
@@ -583,24 +627,221 @@ def prune_by_score(weight: torch.Tensor, score: torch.Tensor, sparsity: float, p
         weight.mul_(mask.reshape_as(weight))
 
 
-def magnitude_prune(model: nn.Module, args: argparse.Namespace) -> dict[str, Any]:
-    pruned_layers = 0
-    for _, module in iter_linear_modules(model, prune_scope=args.prune_scope):
-        prune_by_score(module.weight.data, module.weight.data.abs(), sparsity=args.sparsity, per_row=False)
-        pruned_layers += 1
-    return {
-        "method": "magnitude",
-        "sparsity": args.sparsity,
-        "pruned_linear_layers": pruned_layers,
-        **summarize_linear_scope(model, args.prune_scope),
+def resolve_effective_weight_sparsity(
+    model: nn.Module,
+    args: argparse.Namespace,
+    weights: list[torch.Tensor],
+) -> tuple[float, dict[str, Any]]:
+    model_before = summarize_parameter_sparsity(model)
+    candidate_before = count_parameter_tensors(weights)
+    candidate_total = candidate_before["parameter_count"]
+    if candidate_total <= 0:
+        raise ValueError(f"No prunable weights found for prune scope {args.prune_scope}.")
+
+    if args.sparsity_basis == "targeted-linear":
+        effective = args.sparsity
+        target_model_zero_count = None
+        required_candidate_zero_count = int(round(effective * candidate_total))
+    else:
+        target_model_zero_count = int(round(args.sparsity * model_before["parameter_count"]))
+        noncandidate_zero_count = model_before["zero_parameter_count"] - candidate_before["zero_parameter_count"]
+        required_candidate_zero_count = target_model_zero_count - noncandidate_zero_count
+        if required_candidate_zero_count < candidate_before["zero_parameter_count"]:
+            effective = candidate_before["zero_parameter_count"] / candidate_total
+        else:
+            effective = required_candidate_zero_count / candidate_total
+        if effective > 1.0:
+            raise ValueError(
+                "Cannot reach full-model sparsity "
+                f"{args.sparsity:.4f} with prune scope {args.prune_scope}. "
+                f"Need {required_candidate_zero_count} zeros inside {candidate_total} selected weights. "
+                "Use PRUNE_SCOPE=all-linear or reduce --sparsity."
+            )
+
+    effective = max(0.0, min(1.0, effective))
+    return effective, {
+        "sparsity_basis": args.sparsity_basis,
+        "requested_sparsity": args.sparsity,
+        "effective_weight_sparsity": effective,
+        "full_model_sparsity_before": model_before["parameter_sparsity"],
+        "full_model_parameter_count": model_before["parameter_count"],
+        "full_model_zero_count_before": model_before["zero_parameter_count"],
+        "full_model_target_zero_count": target_model_zero_count,
+        "candidate_weight_count_before": candidate_before["parameter_count"],
+        "candidate_zero_weight_count_before": candidate_before["zero_parameter_count"],
+        "candidate_required_zero_weight_count": required_candidate_zero_count,
     }
 
 
+def finalize_pruning_summary(
+    model: nn.Module,
+    args: argparse.Namespace,
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    model_after = summarize_parameter_sparsity(model)
+    target_zero_count = int(round(args.sparsity * model_after["parameter_count"]))
+    reported_target_zero_count = summary.get("full_model_target_zero_count")
+    if reported_target_zero_count is None:
+        reported_target_zero_count = target_zero_count
+    return {
+        **summary,
+        **summarize_linear_scope(model, args.prune_scope),
+        "full_model_sparsity_after": model_after["parameter_sparsity"],
+        "full_model_zero_count_after": model_after["zero_parameter_count"],
+        "full_model_active_parameter_count_after": model_after["active_parameter_count"],
+        "full_model_target_zero_count": reported_target_zero_count,
+        "full_model_sparsity_matches_target": abs(model_after["parameter_sparsity"] - args.sparsity) <= 0.001,
+    }
+
+
+def prune_parameters_by_global_magnitude(
+    parameters: list[torch.Tensor],
+    additional_zero_count: int,
+) -> int:
+    if additional_zero_count <= 0:
+        return 0
+
+    score_chunks: list[torch.Tensor] = []
+    active_total = 0
+    for parameter in parameters:
+        data = parameter.data
+        active = data.ne(0)
+        active_count = int(active.sum().item())
+        if active_count == 0:
+            continue
+        active_total += active_count
+        score_chunks.append(data.detach().abs().float()[active].cpu())
+
+    if additional_zero_count > active_total:
+        raise ValueError(
+            f"Cannot prune {additional_zero_count} additional parameters; only {active_total} active candidates exist."
+        )
+    if not score_chunks:
+        return 0
+    if additional_zero_count == active_total:
+        for parameter in parameters:
+            parameter.data.zero_()
+        return active_total
+
+    all_scores = torch.cat(score_chunks)
+    threshold = torch.kthvalue(all_scores, additional_zero_count).values.item()
+    pruned = 0
+
+    with torch.no_grad():
+        for parameter in parameters:
+            data = parameter.data
+            score = data.detach().abs().float()
+            prune_mask = data.ne(0) & (score < threshold)
+            count = int(prune_mask.sum().item())
+            if count:
+                data[prune_mask] = 0
+                pruned += count
+
+        remaining = additional_zero_count - pruned
+        if remaining <= 0:
+            return pruned
+
+        for parameter in parameters:
+            if remaining <= 0:
+                break
+            data = parameter.data
+            score = data.detach().abs().float()
+            tie_mask = data.ne(0) & (score == threshold)
+            tie_indices = torch.nonzero(tie_mask.reshape(-1), as_tuple=False).flatten()
+            if tie_indices.numel() == 0:
+                continue
+            take = min(remaining, int(tie_indices.numel()))
+            data.reshape(-1)[tie_indices[:take]] = 0
+            pruned += take
+            remaining -= take
+
+    return pruned
+
+
+def apply_full_model_magnitude_correction(
+    model: nn.Module,
+    target_sparsity: float,
+    excluded_parameter_ids: set[int],
+) -> dict[str, Any]:
+    before = summarize_parameter_sparsity(model)
+    target_zero_count = int(round(target_sparsity * before["parameter_count"]))
+    if before["zero_parameter_count"] >= target_zero_count:
+        return {
+            "enabled": True,
+            "needed": False,
+            "target_zero_count": target_zero_count,
+            "zero_count_before": before["zero_parameter_count"],
+            "zero_count_after": before["zero_parameter_count"],
+            "effective_correction_sparsity": 0.0,
+        }
+
+    correction_parameters = [
+        parameter
+        for _, parameter in model.named_parameters()
+        if id(parameter) not in excluded_parameter_ids
+    ]
+    correction_before = count_parameter_tensors(correction_parameters)
+    noncorrection_zero_count = before["zero_parameter_count"] - correction_before["zero_parameter_count"]
+    required_correction_zero_count = target_zero_count - noncorrection_zero_count
+    if correction_before["parameter_count"] <= 0 or required_correction_zero_count > correction_before["parameter_count"]:
+        raise ValueError(
+            "NVIDIA 2:4 pruning cannot reach full-model sparsity "
+            f"{target_sparsity:.4f} without modifying protected 2:4 weights."
+        )
+
+    additional_zero_count = target_zero_count - before["zero_parameter_count"]
+    pruned_by_correction = prune_parameters_by_global_magnitude(
+        correction_parameters,
+        additional_zero_count=additional_zero_count,
+    )
+    after = summarize_parameter_sparsity(model)
+    return {
+        "enabled": True,
+        "needed": True,
+        "method": "magnitude",
+        "target_zero_count": target_zero_count,
+        "zero_count_before": before["zero_parameter_count"],
+        "zero_count_after": after["zero_parameter_count"],
+        "correction_parameter_count": correction_before["parameter_count"],
+        "correction_zero_count_before": correction_before["zero_parameter_count"],
+        "required_correction_zero_count": required_correction_zero_count,
+        "additional_zero_count": additional_zero_count,
+        "pruned_by_correction": pruned_by_correction,
+        "effective_correction_sparsity": (
+            required_correction_zero_count / correction_before["parameter_count"]
+            if correction_before["parameter_count"]
+            else 0.0
+        ),
+        "full_model_sparsity_after_correction": after["parameter_sparsity"],
+    }
+
+
+def magnitude_prune(model: nn.Module, args: argparse.Namespace) -> dict[str, Any]:
+    linear_modules = iter_linear_modules(model, prune_scope=args.prune_scope)
+    effective_sparsity, basis_summary = resolve_effective_weight_sparsity(
+        model,
+        args,
+        [module.weight for _, module in linear_modules],
+    )
+    pruned_layers = 0
+    for _, module in linear_modules:
+        prune_by_score(module.weight.data, module.weight.data.abs(), sparsity=effective_sparsity, per_row=False)
+        pruned_layers += 1
+    return finalize_pruning_summary(model, args, {
+        "method": "magnitude",
+        "sparsity": args.sparsity,
+        **basis_summary,
+        "pruned_linear_layers": pruned_layers,
+    })
+
+
 def nvidia_2_4_prune(model: nn.Module, args: argparse.Namespace) -> dict[str, Any]:
+    linear_modules = iter_linear_modules(model, prune_scope=args.prune_scope)
     pruned_layers = 0
     skipped_layers = 0
+    protected_parameter_ids: set[int] = set()
     with torch.no_grad():
-        for _, module in iter_linear_modules(model, prune_scope=args.prune_scope):
+        for _, module in linear_modules:
             weight = module.weight.data
             if weight.shape[1] % 4 != 0:
                 skipped_layers += 1
@@ -611,14 +852,31 @@ def nvidia_2_4_prune(model: nn.Module, args: argparse.Namespace) -> dict[str, An
             mask.scatter_(2, prune_indices, False)
             weight.copy_((grouped * mask).view_as(weight))
             pruned_layers += 1
-    return {
+            protected_parameter_ids.add(id(module.weight))
+
+    if pruned_layers == 0:
+        raise ValueError(f"NVIDIA 2:4 pruning found no eligible linear layers in prune scope {args.prune_scope}.")
+
+    correction_summary = {"enabled": False}
+    if args.sparsity_basis == "full-model" and args.full_model_correction:
+        correction_summary = apply_full_model_magnitude_correction(
+            model,
+            target_sparsity=args.sparsity,
+            excluded_parameter_ids=protected_parameter_ids,
+        )
+
+    return finalize_pruning_summary(model, args, {
         "method": "nvidia",
         "pattern": "2:4",
         "effective_sparsity": 0.5,
+        "sparsity": args.sparsity,
+        "sparsity_basis": args.sparsity_basis,
+        "requested_sparsity": args.sparsity,
+        "effective_weight_sparsity": 0.5,
         "pruned_linear_layers": pruned_layers,
         "skipped_linear_layers": skipped_layers,
-        **summarize_linear_scope(model, args.prune_scope),
-    }
+        "full_model_correction": correction_summary,
+    })
 
 
 def make_calibration_loader(
@@ -643,9 +901,15 @@ def gradient_prune(
     state: DistributedState,
 ) -> dict[str, Any]:
     model.train()
+    linear_modules = iter_linear_modules(model, prune_scope=args.prune_scope)
+    effective_sparsity, basis_summary = resolve_effective_weight_sparsity(
+        model,
+        args,
+        [module.weight for _, module in linear_modules],
+    )
     saliency = {
         module: torch.zeros_like(module.weight.data, dtype=torch.float32, device=module.weight.device)
-        for _, module in iter_linear_modules(model, prune_scope=args.prune_scope)
+        for _, module in linear_modules
     }
     loader = make_calibration_loader(calibration_records, tokenizer, args)
     used_batches = 0
@@ -664,15 +928,15 @@ def gradient_prune(
 
     model.zero_grad(set_to_none=True)
     for module, score in saliency.items():
-        prune_by_score(module.weight.data, score, sparsity=args.sparsity, per_row=False)
-    return {
+        prune_by_score(module.weight.data, score, sparsity=effective_sparsity, per_row=False)
+    return finalize_pruning_summary(model, args, {
         "method": "gradient",
         "sparsity": args.sparsity,
+        **basis_summary,
         "calibration_examples": min(len(calibration_records), used_batches * args.calibration_batch_size),
         "calibration_batches": used_batches,
         "pruned_linear_layers": len(saliency),
-        **summarize_linear_scope(model, args.prune_scope),
-    }
+    })
 
 
 def wanda_prune(
@@ -683,7 +947,13 @@ def wanda_prune(
     state: DistributedState,
 ) -> dict[str, Any]:
     activation_stats: dict[nn.Linear, dict[str, Any]] = {}
-    module_names = {module: name for name, module in iter_linear_modules(model, prune_scope=args.prune_scope)}
+    linear_modules = iter_linear_modules(model, prune_scope=args.prune_scope)
+    effective_sparsity, basis_summary = resolve_effective_weight_sparsity(
+        model,
+        args,
+        [module.weight for _, module in linear_modules],
+    )
+    module_names = {module: name for name, module in linear_modules}
     skipped_non_tensor: set[nn.Linear] = set()
     skipped_shape_mismatch: set[nn.Linear] = set()
     handles = []
@@ -711,7 +981,7 @@ def wanda_prune(
         stats["sum_sq"].add_((activation * activation).sum(dim=0))
         stats["count"] += activation.shape[0]
 
-    for _, module in iter_linear_modules(model, prune_scope=args.prune_scope):
+    for _, module in linear_modules:
         handles.append(module.register_forward_hook(hook))
 
     loader = make_calibration_loader(calibration_records, tokenizer, args)
@@ -740,13 +1010,14 @@ def wanda_prune(
             continue
         activation_norm = activation_norm.to(module.weight.device)
         score = module.weight.data.abs().float() * activation_norm.unsqueeze(0)
-        prune_by_score(module.weight.data, score, sparsity=args.sparsity, per_row=True)
+        prune_by_score(module.weight.data, score, sparsity=effective_sparsity, per_row=True)
         pruned_layers += 1
 
     skipped_modules = skipped_non_tensor | skipped_shape_mismatch | skipped_prune_shape_mismatch
-    return {
+    return finalize_pruning_summary(model, args, {
         "method": "wanda",
         "sparsity": args.sparsity,
+        **basis_summary,
         "calibration_examples": min(len(calibration_records), used_batches * args.calibration_batch_size),
         "calibration_batches": used_batches,
         "pruned_linear_layers": pruned_layers,
@@ -755,8 +1026,7 @@ def wanda_prune(
         "skipped_shape_mismatch_layers": sorted(
             module_names.get(module, "<unnamed>") for module in (skipped_shape_mismatch | skipped_prune_shape_mismatch)
         ),
-        **summarize_linear_scope(model, args.prune_scope),
-    }
+    })
 
 
 def run_pruning(
@@ -837,7 +1107,9 @@ def make_plan_report(
         "pruning": {
             "method": args.method,
             "target_sparsity": args.sparsity,
+            "sparsity_basis": args.sparsity_basis,
             "prune_scope": args.prune_scope,
+            "full_model_correction": args.full_model_correction,
         },
         "datasets": {name: {"total": len(records)} for name, records in datasets.items()},
     }
@@ -860,7 +1132,7 @@ def run_pruning_on_rank0_and_sync(
             rank0_print(
                 state,
                 f"Running {args.method} pruning at target sparsity {args.sparsity:.2f} "
-                f"on {args.prune_scope}",
+                f"with {args.sparsity_basis} basis on {args.prune_scope}",
             )
             pruning_summary = run_pruning(model, tokenizer, calibration_records, args, state)
             pruned_model_summary = summarize_model(model, str(pruned_output_dir))

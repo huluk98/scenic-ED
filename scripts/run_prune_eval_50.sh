@@ -15,7 +15,8 @@ cd "$(dirname "$0")/.."
 METHOD="${METHOD:-magnitude}"
 SPARSITY="${SPARSITY:-0.5}"
 IGNORE_SPACES="${IGNORE_SPACES:-0}"
-PRUNE_SCOPE="${PRUNE_SCOPE:-encoder-linear}"
+PRUNE_SCOPE="${PRUNE_SCOPE:-all-linear}"
+SPARSITY_BASIS="${SPARSITY_BASIS:-full-model}"
 SAFE_MODEL_NAME="$(basename "$MODEL_PATH" | tr -c 'A-Za-z0-9_.-' '_')"
 SAFE_MODEL_NAME="${SAFE_MODEL_NAME%_}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-prune_eval_outputs}"
@@ -39,6 +40,10 @@ if [[ -z "${NPROC_PER_NODE:-}" ]]; then
 fi
 
 mkdir -p "$RUN_DIR"
+echo "Prune method: $METHOD"
+echo "Prune sparsity: $SPARSITY"
+echo "Prune scope: $PRUNE_SCOPE"
+echo "Sparsity basis: $SPARSITY_BASIS"
 
 USER_SET_PRUNED_DIR=0
 USER_SET_REPORT_JSON=0
@@ -58,6 +63,7 @@ COMMON_ARGS=(
   --model "$MODEL_PATH"
   --method "$METHOD"
   --sparsity "$SPARSITY"
+  --sparsity-basis "$SPARSITY_BASIS"
   --prune-scope "$PRUNE_SCOPE"
 )
 

@@ -11,8 +11,8 @@ from check_pruned_model_sparsity import inspect_active_parameters
 #   python scripts/count_active_params_simple.py
 MODEL_PATH = "prune_eval_outputs/<run>/contrastive_sft/gradient_50/pruned_model"
 
-# For the current reference-style pruning runs, keep this as encoder-linear.
-EXPECTED_SCOPE = "encoder-linear"
+# For the current full-model pruning runs, keep this as all-linear.
+EXPECTED_SCOPE = "all-linear"
 
 # Leave empty to only print results. Set a path to also write JSON.
 OUTPUT_JSON = ""

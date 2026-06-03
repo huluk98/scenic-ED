@@ -17,6 +17,7 @@ class ModelEntry:
     method: str
     model_dir: Path
     expected_scope: str
+    expected_basis: str
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,8 +43,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--default-prune-scope",
         choices=PRUNE_SCOPES,
-        default="encoder-linear",
+        default="all-linear",
         help="Scope to use when a report does not record prune_scope.",
+    )
+    parser.add_argument(
+        "--default-sparsity-basis",
+        choices=("full-model", "targeted-linear"),
+        default="full-model",
+        help="Sparsity basis to use when a report does not record sparsity_basis.",
     )
     return parser.parse_args()
 
@@ -74,7 +81,13 @@ def method_from_dir(path: Path) -> str:
     return parent or "unknown"
 
 
-def entries_from_report(path: Path, base_dir: Path, default_scope: str, include_originals: bool) -> list[ModelEntry]:
+def entries_from_report(
+    path: Path,
+    base_dir: Path,
+    default_scope: str,
+    default_basis: str,
+    include_originals: bool,
+) -> list[ModelEntry]:
     report = read_json(path)
     report_dir = path.parent
     entries: list[ModelEntry] = []
@@ -88,6 +101,7 @@ def entries_from_report(path: Path, base_dir: Path, default_scope: str, include_
                         method="dense",
                         model_dir=resolve_path(model_info["model_path"], base_dir=base_dir, report_dir=report_dir),
                         expected_scope=default_scope,
+                        expected_basis=default_basis,
                     )
                 )
             for method, method_info in (model_info.get("methods") or {}).items():
@@ -101,6 +115,7 @@ def entries_from_report(path: Path, base_dir: Path, default_scope: str, include_
                         method=method,
                         model_dir=resolve_path(pruned_path, base_dir=base_dir, report_dir=report_dir),
                         expected_scope=pruning.get("prune_scope") or default_scope,
+                        expected_basis=pruning.get("sparsity_basis") or default_basis,
                     )
                 )
         return entries
@@ -114,6 +129,7 @@ def entries_from_report(path: Path, base_dir: Path, default_scope: str, include_
                     method="dense",
                     model_dir=resolve_path(report["contrastive_model_path"], base_dir=base_dir, report_dir=report_dir),
                     expected_scope=default_scope,
+                    expected_basis=default_basis,
                 )
             )
         for method, method_info in report["methods"].items():
@@ -127,12 +143,13 @@ def entries_from_report(path: Path, base_dir: Path, default_scope: str, include_
                     method=method,
                     model_dir=resolve_path(pruned_path, base_dir=base_dir, report_dir=report_dir),
                     expected_scope=pruning.get("prune_scope") or default_scope,
+                    expected_basis=pruning.get("sparsity_basis") or default_basis,
                 )
             )
     return entries
 
 
-def entries_from_run_dir(path: Path, default_scope: str, include_originals: bool) -> list[ModelEntry]:
+def entries_from_run_dir(path: Path, default_scope: str, default_basis: str, include_originals: bool) -> list[ModelEntry]:
     entries: list[ModelEntry] = []
     for model_dir in sorted(path.glob("**/pruned_model")):
         relative = model_dir.relative_to(path)
@@ -144,6 +161,7 @@ def entries_from_run_dir(path: Path, default_scope: str, include_originals: bool
                 method=method_from_dir(model_dir),
                 model_dir=model_dir,
                 expected_scope=default_scope,
+                expected_basis=default_basis,
             )
         )
 
@@ -155,6 +173,7 @@ def entries_from_run_dir(path: Path, default_scope: str, include_originals: bool
                     method="dense",
                     model_dir=model_dir,
                     expected_scope=default_scope,
+                    expected_basis=default_basis,
                 )
             )
     return entries
@@ -280,6 +299,7 @@ def inspect_model_dir(entry: ModelEntry, expected_sparsity: float, tolerance: fl
         "exists": model_dir.exists(),
         "expected_sparsity": expected_sparsity,
         "expected_scope": entry.expected_scope,
+        "expected_basis": entry.expected_basis,
     }
     if not model_dir.exists():
         result["status"] = "missing_model_dir"
@@ -328,18 +348,22 @@ def inspect_model_dir(entry: ModelEntry, expected_sparsity: float, tolerance: fl
         }
 
     expected_scope_result = scope_results.get(entry.expected_scope, {})
+    full_model_matches = abs(overall_sparsity - expected_sparsity) <= tolerance
+    expected_scope_matches = bool(expected_scope_result.get("matches_expected"))
+    expected_basis_matches = full_model_matches if entry.expected_basis == "full-model" else expected_scope_matches
     result.update(
         {
             "status": "ok",
             "overall": {
                 **with_active_count(overall),
                 "sparsity": overall_sparsity,
-                "matches_expected": abs(overall_sparsity - expected_sparsity) <= tolerance,
+                "matches_expected": full_model_matches,
             },
             "linear_scopes": scope_results,
             "expected_scope_result": expected_scope_result,
-            "full_model_is_50_percent_sparse": abs(overall_sparsity - expected_sparsity) <= tolerance,
-            "expected_scope_is_50_percent_sparse": bool(expected_scope_result.get("matches_expected")),
+            "full_model_is_50_percent_sparse": full_model_matches,
+            "expected_scope_is_50_percent_sparse": expected_scope_matches,
+            "expected_basis_is_50_percent_sparse": expected_basis_matches,
         }
     )
     return result
@@ -348,7 +372,8 @@ def inspect_model_dir(entry: ModelEntry, expected_sparsity: float, tolerance: fl
 def inspect_active_parameters(
     model_path: str | Path,
     *,
-    expected_scope: str = "encoder-linear",
+    expected_scope: str = "all-linear",
+    expected_basis: str = "full-model",
     expected_sparsity: float = 0.5,
     tolerance: float = 0.01,
     label: str = "model",
@@ -365,6 +390,7 @@ def inspect_active_parameters(
         method=method,
         model_dir=Path(model_path).expanduser(),
         expected_scope=expected_scope,
+        expected_basis=expected_basis,
     )
     return inspect_model_dir(entry, expected_sparsity=expected_sparsity, tolerance=tolerance)
 
@@ -372,8 +398,8 @@ def inspect_active_parameters(
 def print_table(results: list[dict[str, Any]]) -> None:
     header = (
         f"{'label':18s} {'method':12s} {'status':18s} {'overall':>9s} "
-        f"{'active':>14s} {'scope':15s} {'scope_sp':>9s} {'scope_act':>14s} "
-        f"{'full50':>7s} {'scope50':>8s}"
+        f"{'active':>14s} {'basis':12s} {'scope':15s} {'scope_sp':>9s} "
+        f"{'scope_act':>14s} {'basis50':>8s} {'full50':>7s} {'scope50':>8s}"
     )
     print(header)
     print("-" * len(header))
@@ -389,8 +415,9 @@ def print_table(results: list[dict[str, Any]]) -> None:
         print(
             f"{result['label'][:18]:18s} {result['method'][:12]:12s} {result['status']:18s} "
             f"{result['overall']['sparsity']:9.4f} {result['overall']['active']:14d} "
-            f"{scope:15s} {scope_sparsity:9.4f} "
+            f"{result.get('expected_basis', '')[:12]:12s} {scope:15s} {scope_sparsity:9.4f} "
             f"{result['expected_scope_result'].get('active', 0):14d} "
+            f"{str(result['expected_basis_is_50_percent_sparse']):>8s} "
             f"{str(result['full_model_is_50_percent_sparse']):>7s} "
             f"{str(result['expected_scope_is_50_percent_sparse']):>8s}"
         )
@@ -405,14 +432,17 @@ def build_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
     ok_results = [result for result in results if result.get("status") == "ok"]
     full_50 = [result for result in ok_results if result.get("full_model_is_50_percent_sparse")]
     scope_50 = [result for result in ok_results if result.get("expected_scope_is_50_percent_sparse")]
+    basis_50 = [result for result in ok_results if result.get("expected_basis_is_50_percent_sparse")]
     return {
         "total_entries": len(results),
         "ok_entries": len(ok_results),
         "status_counts": status_counts,
         "full_model_50_percent_sparse_count": len(full_50),
         "expected_scope_50_percent_sparse_count": len(scope_50),
+        "expected_basis_50_percent_sparse_count": len(basis_50),
         "all_existing_models_full_50_percent_sparse": bool(ok_results) and len(full_50) == len(ok_results),
         "all_existing_models_expected_scope_50_percent_sparse": bool(ok_results) and len(scope_50) == len(ok_results),
+        "all_existing_models_expected_basis_50_percent_sparse": bool(ok_results) and len(basis_50) == len(ok_results),
     }
 
 
@@ -429,6 +459,7 @@ def main() -> None:
                 method="direct",
                 model_dir=model_path,
                 expected_scope=args.default_prune_scope,
+                expected_basis=args.default_sparsity_basis,
             )
         )
     if args.report_json:
@@ -437,6 +468,7 @@ def main() -> None:
                 Path(args.report_json).expanduser(),
                 base_dir=base_dir,
                 default_scope=args.default_prune_scope,
+                default_basis=args.default_sparsity_basis,
                 include_originals=args.include_originals,
             )
         )
@@ -445,6 +477,7 @@ def main() -> None:
             entries_from_run_dir(
                 Path(args.run_dir).expanduser(),
                 default_scope=args.default_prune_scope,
+                default_basis=args.default_sparsity_basis,
                 include_originals=args.include_originals,
             )
         )
@@ -455,6 +488,7 @@ def main() -> None:
                 entries_from_run_dir(
                     default_run_dir,
                     default_scope=args.default_prune_scope,
+                    default_basis=args.default_sparsity_basis,
                     include_originals=args.include_originals,
                 )
             )
@@ -471,6 +505,7 @@ def main() -> None:
     print(
         "Summary: "
         f"ok={summary['ok_entries']}/{summary['total_entries']} "
+        f"basis50={summary['expected_basis_50_percent_sparse_count']} "
         f"scope50={summary['expected_scope_50_percent_sparse_count']} "
         f"full50={summary['full_model_50_percent_sparse_count']}"
     )
