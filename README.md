@@ -239,6 +239,14 @@ python scripts/check_pruned_model_sparsity.py \
 
 For encoder-only pruning, `expected_scope_is_50_percent_sparse` should be true, while `full_model_is_50_percent_sparse` will usually be false because decoder/output parameters are intentionally left dense.
 
+To inspect active/nonzero parameters for one model path directly:
+
+```bash
+python scripts/check_pruned_model_sparsity.py \
+  --model-path prune_eval_outputs/<run>/contrastive_sft/gradient_50/pruned_model \
+  --output-json prune_eval_outputs/<run>/contrastive_gradient_active_params.json
+```
+
 To run the full pipeline from the base ChatLM model in one command, use:
 
 ```bash

@@ -28,6 +28,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--report-json", default=None, help="Combined prune/eval JSON report to inspect.")
     parser.add_argument("--run-dir", default=None, help="Run directory containing pruned_model folders.")
+    parser.add_argument(
+        "--model-path",
+        action="append",
+        default=[],
+        help="Model directory or one checkpoint weight file to inspect directly. Can be used more than once.",
+    )
     parser.add_argument("--base-dir", default=".", help="Base directory for relative paths in reports.")
     parser.add_argument("--output-json", default=None, help="Optional JSON output path.")
     parser.add_argument("--include-originals", action="store_true", help="Also check dense SFT model directories.")
@@ -154,7 +160,13 @@ def entries_from_run_dir(path: Path, default_scope: str, include_originals: bool
     return entries
 
 
-def checkpoint_weight_files(model_dir: Path) -> list[Path]:
+def checkpoint_weight_files(model_path: Path) -> list[Path]:
+    if model_path.is_file():
+        if model_path.name.endswith((".safetensors", ".bin")):
+            return [model_path]
+        return []
+
+    model_dir = model_path
     index_files = sorted(model_dir.glob("*.safetensors.index.json"))
     if index_files:
         weight_files: set[Path] = set()
@@ -246,12 +258,25 @@ def add_counts(counts: dict[str, int], total: int, zeros: int, layer: bool = Fal
         counts["layers"] += 1
 
 
+def with_active_count(counts: dict[str, Any]) -> dict[str, Any]:
+    params = int(counts.get("params", 0))
+    zeros = int(counts.get("zeros", 0))
+    return {
+        **counts,
+        "active": params - zeros,
+        "active_parameter_count": params - zeros,
+        "zero_parameter_count": zeros,
+        "parameter_count": params,
+    }
+
+
 def inspect_model_dir(entry: ModelEntry, expected_sparsity: float, tolerance: float) -> dict[str, Any]:
     model_dir = entry.model_dir
     result: dict[str, Any] = {
         "label": entry.label,
         "method": entry.method,
         "model_dir": str(model_dir),
+        "model_path": str(model_dir),
         "exists": model_dir.exists(),
         "expected_sparsity": expected_sparsity,
         "expected_scope": entry.expected_scope,
@@ -297,7 +322,7 @@ def inspect_model_dir(entry: ModelEntry, expected_sparsity: float, tolerance: fl
     for scope, counts in scopes.items():
         sparsity = counts["zeros"] / counts["params"] if counts["params"] else 0.0
         scope_results[scope] = {
-            **counts,
+            **with_active_count(counts),
             "sparsity": sparsity,
             "matches_expected": abs(sparsity - expected_sparsity) <= tolerance if counts["params"] else False,
         }
@@ -307,7 +332,7 @@ def inspect_model_dir(entry: ModelEntry, expected_sparsity: float, tolerance: fl
         {
             "status": "ok",
             "overall": {
-                **overall,
+                **with_active_count(overall),
                 "sparsity": overall_sparsity,
                 "matches_expected": abs(overall_sparsity - expected_sparsity) <= tolerance,
             },
@@ -320,10 +345,35 @@ def inspect_model_dir(entry: ModelEntry, expected_sparsity: float, tolerance: fl
     return result
 
 
+def inspect_active_parameters(
+    model_path: str | Path,
+    *,
+    expected_scope: str = "encoder-linear",
+    expected_sparsity: float = 0.5,
+    tolerance: float = 0.01,
+    label: str = "model",
+    method: str = "direct",
+) -> dict[str, Any]:
+    """Return active/nonzero parameter counts for a model directory or weight file.
+
+    Active parameters are parameters whose stored value is non-zero. This is meant
+    for pruned checkpoints, so it reads raw checkpoint tensors and does not need
+    custom ChatLM model code.
+    """
+    entry = ModelEntry(
+        label=label,
+        method=method,
+        model_dir=Path(model_path).expanduser(),
+        expected_scope=expected_scope,
+    )
+    return inspect_model_dir(entry, expected_sparsity=expected_sparsity, tolerance=tolerance)
+
+
 def print_table(results: list[dict[str, Any]]) -> None:
     header = (
         f"{'label':18s} {'method':12s} {'status':18s} {'overall':>9s} "
-        f"{'scope':15s} {'scope_sp':>9s} {'full50':>7s} {'scope50':>8s}"
+        f"{'active':>14s} {'scope':15s} {'scope_sp':>9s} {'scope_act':>14s} "
+        f"{'full50':>7s} {'scope50':>8s}"
     )
     print(header)
     print("-" * len(header))
@@ -338,7 +388,9 @@ def print_table(results: list[dict[str, Any]]) -> None:
         scope_sparsity = result["expected_scope_result"].get("sparsity", 0.0)
         print(
             f"{result['label'][:18]:18s} {result['method'][:12]:12s} {result['status']:18s} "
-            f"{result['overall']['sparsity']:9.4f} {scope:15s} {scope_sparsity:9.4f} "
+            f"{result['overall']['sparsity']:9.4f} {result['overall']['active']:14d} "
+            f"{scope:15s} {scope_sparsity:9.4f} "
+            f"{result['expected_scope_result'].get('active', 0):14d} "
             f"{str(result['full_model_is_50_percent_sparse']):>7s} "
             f"{str(result['expected_scope_is_50_percent_sparse']):>8s}"
         )
@@ -369,6 +421,16 @@ def main() -> None:
     base_dir = Path(args.base_dir).expanduser()
     entries: list[ModelEntry] = []
 
+    for raw_model_path in args.model_path:
+        model_path = Path(raw_model_path).expanduser()
+        entries.append(
+            ModelEntry(
+                label=model_path.name or "model",
+                method="direct",
+                model_dir=model_path,
+                expected_scope=args.default_prune_scope,
+            )
+        )
     if args.report_json:
         entries.extend(
             entries_from_report(
