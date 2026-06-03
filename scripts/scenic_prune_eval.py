@@ -26,6 +26,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from scenic_train_chatlm_sft import (  # noqa: E402
+    append_eos_to_targets,
     repair_checkpoint_for_auto_load,
     repair_tokenizer_files_for_auto_load,
     sanitize_model_for_save,
@@ -79,12 +80,12 @@ class CalibrationDataset(Dataset):
             truncation=True,
             max_length=self.max_input_len,
         )
-        labels = tokenize_targets(
+        labels, label_attention_mask = tokenize_targets(
             self.tokenizer,
             [response],
             max_length=self.max_target_len,
         )
-        labels = mask_pad_tokens(labels, self.tokenizer.pad_token_id)
+        labels = mask_pad_tokens(labels, self.tokenizer.pad_token_id, label_attention_mask)
         return {
             "input_ids": encoded["input_ids"].squeeze(0),
             "attention_mask": encoded["attention_mask"].squeeze(0),
@@ -255,7 +256,7 @@ def truncate_records(records: list[dict[str, Any]], limit: int | None) -> list[d
     return records[:limit]
 
 
-def tokenize_targets(tokenizer: Any, targets: list[str], max_length: int) -> Any:
+def tokenize_targets(tokenizer: Any, targets: list[str], max_length: int) -> tuple[Any, Any | None]:
     try:
         labels = tokenizer(
             text_target=targets,
@@ -273,10 +274,20 @@ def tokenize_targets(tokenizer: Any, targets: list[str], max_length: int) -> Any
                 max_length=max_length,
                 return_tensors="pt",
             )
-    return labels["input_ids"]
+    return append_eos_to_targets(
+        labels["input_ids"],
+        labels.get("attention_mask"),
+        getattr(tokenizer, "eos_token_id", None),
+        getattr(tokenizer, "pad_token_id", None),
+        max_length,
+    )
 
 
-def mask_pad_tokens(labels: Any, pad_token_id: int | None) -> Any:
+def mask_pad_tokens(labels: Any, pad_token_id: int | None, attention_mask: Any | None = None) -> Any:
+    if attention_mask is not None:
+        labels = labels.clone()
+        labels[attention_mask == 0] = -100
+        return labels
     if pad_token_id is None:
         return labels
     labels = labels.clone()

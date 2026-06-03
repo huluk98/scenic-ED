@@ -654,7 +654,52 @@ def raise_model_load_error(config: RegularSFTConfig, exc: Exception) -> None:
     raise exc
 
 
-def tokenize_targets(tokenizer: Any, targets: list[str], max_length: int) -> Any:
+def append_eos_to_targets(
+    input_ids: Any,
+    attention_mask: Any | None,
+    eos_token_id: int | None,
+    pad_token_id: int | None,
+    max_length: int,
+) -> tuple[Any, Any | None]:
+    if eos_token_id is None:
+        return input_ids, attention_mask
+
+    import torch
+
+    if attention_mask is None:
+        if pad_token_id is None:
+            attention_mask = input_ids.new_ones(input_ids.shape)
+        else:
+            attention_mask = input_ids.ne(pad_token_id).long()
+
+    input_ids = input_ids.clone()
+    attention_mask = attention_mask.clone()
+    needs_extra_column = False
+    for row_index in range(input_ids.size(0)):
+        length = int(attention_mask[row_index].sum().item())
+        has_eos = length > 0 and int(input_ids[row_index, length - 1].item()) == eos_token_id
+        if not has_eos and length >= input_ids.size(1):
+            needs_extra_column = True
+            break
+
+    if needs_extra_column and input_ids.size(1) < max_length:
+        pad_value = eos_token_id if pad_token_id is None else pad_token_id
+        pad_column = input_ids.new_full((input_ids.size(0), 1), pad_value)
+        mask_column = attention_mask.new_zeros((attention_mask.size(0), 1))
+        input_ids = torch.cat((input_ids, pad_column), dim=1)
+        attention_mask = torch.cat((attention_mask, mask_column), dim=1)
+
+    for row_index in range(input_ids.size(0)):
+        length = int(attention_mask[row_index].sum().item())
+        if length > 0 and int(input_ids[row_index, length - 1].item()) == eos_token_id:
+            continue
+        eos_position = min(length, input_ids.size(1) - 1)
+        input_ids[row_index, eos_position] = eos_token_id
+        attention_mask[row_index, eos_position] = 1
+    return input_ids, attention_mask
+
+
+def tokenize_targets(tokenizer: Any, targets: list[str], max_length: int) -> tuple[Any, Any | None]:
     try:
         labels = tokenizer(
             text_target=targets,
@@ -674,10 +719,20 @@ def tokenize_targets(tokenizer: Any, targets: list[str], max_length: int) -> Any
                 pad_to_multiple_of=8,
                 return_tensors="pt",
             )
-    return labels["input_ids"]
+    return append_eos_to_targets(
+        labels["input_ids"],
+        labels.get("attention_mask"),
+        getattr(tokenizer, "eos_token_id", None),
+        getattr(tokenizer, "pad_token_id", None),
+        max_length,
+    )
 
 
-def mask_pad_tokens(labels: Any, pad_token_id: int | None) -> Any:
+def mask_pad_tokens(labels: Any, pad_token_id: int | None, attention_mask: Any | None = None) -> Any:
+    if attention_mask is not None:
+        labels = labels.clone()
+        labels[attention_mask == 0] = -100
+        return labels
     if pad_token_id is None:
         return labels
     labels = labels.clone()
@@ -708,8 +763,8 @@ def make_regular_collate(tokenizer: Any, config: RegularSFTConfig) -> Callable[[
                 return_tensors="pt",
             )
         )
-        labels = tokenize_targets(tokenizer, targets, config.max_target_length)
-        encoded["labels"] = mask_pad_tokens(labels, tokenizer.pad_token_id)
+        labels, label_attention_mask = tokenize_targets(tokenizer, targets, config.max_target_length)
+        encoded["labels"] = mask_pad_tokens(labels, tokenizer.pad_token_id, label_attention_mask)
         return encoded
 
     return collate
@@ -733,8 +788,12 @@ def make_contrastive_collate(
     def collate(batch: list[dict[str, str]]) -> dict[str, Any]:
         anchors = [item["anchor"] for item in batch]
         positives = [item["positive"] for item in batch]
-        labels = tokenize_targets(tokenizer, [item["response"] for item in batch], config.max_target_length)
-        labels = mask_pad_tokens(labels, tokenizer.pad_token_id)
+        labels, label_attention_mask = tokenize_targets(
+            tokenizer,
+            [item["response"] for item in batch],
+            config.max_target_length,
+        )
+        labels = mask_pad_tokens(labels, tokenizer.pad_token_id, label_attention_mask)
         return {
             "generation": encode_sources(anchors + positives),
             "negative": encode_sources([item["negative"] for item in batch]),
