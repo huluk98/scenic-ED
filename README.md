@@ -247,6 +247,8 @@ python scripts/check_pruned_model_sparsity.py \
   --output-json prune_eval_outputs/<run>/contrastive_gradient_active_params.json
 ```
 
+For a simpler edit-and-run version, set `MODEL_PATH` at the top of `scripts/count_active_params_simple.py`, then run `python scripts/count_active_params_simple.py`.
+
 To run the full pipeline from the base ChatLM model in one command, use:
 
 ```bash
