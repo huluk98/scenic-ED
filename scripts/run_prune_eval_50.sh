@@ -15,6 +15,7 @@ cd "$(dirname "$0")/.."
 METHOD="${METHOD:-magnitude}"
 SPARSITY="${SPARSITY:-0.5}"
 IGNORE_SPACES="${IGNORE_SPACES:-0}"
+PRUNE_SCOPE="${PRUNE_SCOPE:-encoder-linear}"
 SAFE_MODEL_NAME="$(basename "$MODEL_PATH" | tr -c 'A-Za-z0-9_.-' '_')"
 SAFE_MODEL_NAME="${SAFE_MODEL_NAME%_}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-prune_eval_outputs}"
@@ -57,6 +58,7 @@ COMMON_ARGS=(
   --model "$MODEL_PATH"
   --method "$METHOD"
   --sparsity "$SPARSITY"
+  --prune-scope "$PRUNE_SCOPE"
 )
 
 case "$IGNORE_SPACES" in

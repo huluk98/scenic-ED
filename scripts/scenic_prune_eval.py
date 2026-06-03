@@ -103,6 +103,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", required=True, help="Regular SFT or contrastive SFT model path.")
     parser.add_argument("--method", choices=("magnitude", "gradient", "wanda", "nvidia"), default="magnitude")
     parser.add_argument("--sparsity", type=float, default=0.5, help="Unstructured sparsity for magnitude/gradient/WANDA.")
+    parser.add_argument(
+        "--prune-scope",
+        choices=("encoder-linear", "decoder-linear", "all-linear"),
+        default="encoder-linear",
+        help="Linear module scope to prune. Defaults to encoder-linear to match the reference pruning runs.",
+    )
     parser.add_argument("--train-json", default=str(DEFAULT_TRAIN_JSON))
     parser.add_argument("--benchmark-json", default=str(DEFAULT_BENCHMARK_JSON))
     parser.add_argument("--calibration-json", default=None, help="Defaults to --train-json.")
@@ -334,8 +340,46 @@ def load_model_and_tokenizer(args: argparse.Namespace, model_path: str, state: D
     return tokenizer, model
 
 
-def iter_linear_modules(model: nn.Module) -> list[tuple[str, nn.Linear]]:
-    return [(name, module) for name, module in model.named_modules() if isinstance(module, nn.Linear)]
+def linear_module_in_scope(name: str, prune_scope: str) -> bool:
+    if prune_scope == "all-linear":
+        return True
+
+    normalized = name.lower().replace("_", ".")
+    parts = normalized.split(".")
+    is_encoder = "encoder" in parts
+    is_decoder = "decoder" in parts
+
+    if prune_scope == "encoder-linear":
+        return is_encoder and not is_decoder
+    if prune_scope == "decoder-linear":
+        return is_decoder
+    raise ValueError(f"Unknown prune scope: {prune_scope}")
+
+
+def iter_linear_modules(model: nn.Module, prune_scope: str = "all-linear") -> list[tuple[str, nn.Linear]]:
+    return [
+        (name, module)
+        for name, module in model.named_modules()
+        if isinstance(module, nn.Linear) and linear_module_in_scope(name, prune_scope)
+    ]
+
+
+def summarize_linear_scope(model: nn.Module, prune_scope: str) -> dict[str, Any]:
+    linear_total = 0
+    linear_zero = 0
+    linear_layers = 0
+    for _, module in iter_linear_modules(model, prune_scope=prune_scope):
+        linear_layers += 1
+        weight = module.weight.detach()
+        linear_total += weight.numel()
+        linear_zero += int(weight.eq(0).sum().item())
+    return {
+        "prune_scope": prune_scope,
+        "targeted_linear_layer_count": linear_layers,
+        "targeted_linear_weight_count": linear_total,
+        "targeted_zero_weight_count": linear_zero,
+        "targeted_sparsity": linear_zero / linear_total if linear_total else 0.0,
+    }
 
 
 def summarize_model(model: nn.Module, model_path: str) -> dict[str, Any]:
@@ -533,23 +577,30 @@ def prune_by_score(weight: torch.Tensor, score: torch.Tensor, sparsity: float, p
             return
         if keep >= flat_score.numel():
             return
-        threshold = torch.topk(flat_score, keep, largest=True).values.min()
-        weight.mul_(score >= threshold)
+        keep_indices = torch.topk(flat_score, keep, largest=True).indices
+        mask = torch.zeros_like(flat_score, dtype=torch.bool)
+        mask[keep_indices] = True
+        weight.mul_(mask.reshape_as(weight))
 
 
-def magnitude_prune(model: nn.Module, sparsity: float) -> dict[str, Any]:
+def magnitude_prune(model: nn.Module, args: argparse.Namespace) -> dict[str, Any]:
     pruned_layers = 0
-    for _, module in iter_linear_modules(model):
-        prune_by_score(module.weight.data, module.weight.data.abs(), sparsity=sparsity, per_row=False)
+    for _, module in iter_linear_modules(model, prune_scope=args.prune_scope):
+        prune_by_score(module.weight.data, module.weight.data.abs(), sparsity=args.sparsity, per_row=False)
         pruned_layers += 1
-    return {"method": "magnitude", "sparsity": sparsity, "pruned_linear_layers": pruned_layers}
+    return {
+        "method": "magnitude",
+        "sparsity": args.sparsity,
+        "pruned_linear_layers": pruned_layers,
+        **summarize_linear_scope(model, args.prune_scope),
+    }
 
 
-def nvidia_2_4_prune(model: nn.Module) -> dict[str, Any]:
+def nvidia_2_4_prune(model: nn.Module, args: argparse.Namespace) -> dict[str, Any]:
     pruned_layers = 0
     skipped_layers = 0
     with torch.no_grad():
-        for _, module in iter_linear_modules(model):
+        for _, module in iter_linear_modules(model, prune_scope=args.prune_scope):
             weight = module.weight.data
             if weight.shape[1] % 4 != 0:
                 skipped_layers += 1
@@ -566,6 +617,7 @@ def nvidia_2_4_prune(model: nn.Module) -> dict[str, Any]:
         "effective_sparsity": 0.5,
         "pruned_linear_layers": pruned_layers,
         "skipped_linear_layers": skipped_layers,
+        **summarize_linear_scope(model, args.prune_scope),
     }
 
 
@@ -593,7 +645,7 @@ def gradient_prune(
     model.train()
     saliency = {
         module: torch.zeros_like(module.weight.data, dtype=torch.float32, device=module.weight.device)
-        for _, module in iter_linear_modules(model)
+        for _, module in iter_linear_modules(model, prune_scope=args.prune_scope)
     }
     loader = make_calibration_loader(calibration_records, tokenizer, args)
     used_batches = 0
@@ -619,6 +671,7 @@ def gradient_prune(
         "calibration_examples": min(len(calibration_records), used_batches * args.calibration_batch_size),
         "calibration_batches": used_batches,
         "pruned_linear_layers": len(saliency),
+        **summarize_linear_scope(model, args.prune_scope),
     }
 
 
@@ -630,7 +683,7 @@ def wanda_prune(
     state: DistributedState,
 ) -> dict[str, Any]:
     activation_stats: dict[nn.Linear, dict[str, Any]] = {}
-    module_names = {module: name for name, module in iter_linear_modules(model)}
+    module_names = {module: name for name, module in iter_linear_modules(model, prune_scope=args.prune_scope)}
     skipped_non_tensor: set[nn.Linear] = set()
     skipped_shape_mismatch: set[nn.Linear] = set()
     handles = []
@@ -658,7 +711,7 @@ def wanda_prune(
         stats["sum_sq"].add_((activation * activation).sum(dim=0))
         stats["count"] += activation.shape[0]
 
-    for _, module in iter_linear_modules(model):
+    for _, module in iter_linear_modules(model, prune_scope=args.prune_scope):
         handles.append(module.register_forward_hook(hook))
 
     loader = make_calibration_loader(calibration_records, tokenizer, args)
@@ -702,6 +755,7 @@ def wanda_prune(
         "skipped_shape_mismatch_layers": sorted(
             module_names.get(module, "<unnamed>") for module in (skipped_shape_mismatch | skipped_prune_shape_mismatch)
         ),
+        **summarize_linear_scope(model, args.prune_scope),
     }
 
 
@@ -713,13 +767,13 @@ def run_pruning(
     state: DistributedState,
 ) -> dict[str, Any]:
     if args.method == "magnitude":
-        return magnitude_prune(model, args.sparsity)
+        return magnitude_prune(model, args)
     if args.method == "gradient":
         return gradient_prune(model, tokenizer, calibration_records, args, state)
     if args.method == "wanda":
         return wanda_prune(model, tokenizer, calibration_records, args, state)
     if args.method == "nvidia":
-        return nvidia_2_4_prune(model)
+        return nvidia_2_4_prune(model, args)
     raise ValueError(f"Unknown pruning method: {args.method}")
 
 
@@ -783,6 +837,7 @@ def make_plan_report(
         "pruning": {
             "method": args.method,
             "target_sparsity": args.sparsity,
+            "prune_scope": args.prune_scope,
         },
         "datasets": {name: {"total": len(records)} for name, records in datasets.items()},
     }
@@ -802,7 +857,11 @@ def run_pruning_on_rank0_and_sync(
 
     if state.is_main:
         try:
-            rank0_print(state, f"Running {args.method} pruning at target sparsity {args.sparsity:.2f}")
+            rank0_print(
+                state,
+                f"Running {args.method} pruning at target sparsity {args.sparsity:.2f} "
+                f"on {args.prune_scope}",
+            )
             pruning_summary = run_pruning(model, tokenizer, calibration_records, args, state)
             pruned_model_summary = summarize_model(model, str(pruned_output_dir))
             rank0_print(state, f"Saving pruned model to: {pruned_output_dir}")

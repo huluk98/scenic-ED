@@ -17,6 +17,7 @@ Useful env overrides:
   LOCAL_FILES_ONLY=1       # force local/offline base model loading
   LOCAL_FILES_ONLY=0       # allow Hugging Face base model loading
   IGNORE_SPACES=1          # default for Chinese EM; set 0 for strict whitespace-sensitive EM
+  PRUNE_SCOPE=encoder-linear # default to match reference pruning runs
   SKIP_TRAIN=1             # reuse both SFT checkpoints and only prune/eval
   SKIP_REGULAR_TRAIN=1     # reuse regular SFT checkpoint
   SKIP_CONTRASTIVE_TRAIN=1 # reuse contrastive SFT checkpoint
@@ -51,6 +52,7 @@ EVAL_TRAIN_JSON="${EVAL_TRAIN_JSON:-data/SCENIC_full_training_dataset.json}"
 BENCHMARK_JSON="${BENCHMARK_JSON:-generated/iot_instruction_benchmark_200.json}"
 CALIBRATION_JSON="${CALIBRATION_JSON:-$EVAL_TRAIN_JSON}"
 PRUNE_METHODS="${PRUNE_METHODS:-magnitude wanda gradient nvidia24}"
+PRUNE_SCOPE="${PRUNE_SCOPE:-encoder-linear}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 SAFE_BASE="$(basename "$BASE_MODEL" | tr -c 'A-Za-z0-9_.-' '_')"
 SAFE_BASE="${SAFE_BASE%_}"
@@ -185,6 +187,7 @@ echo "Contrastive train data: $CONTRASTIVE_TRAIN_JSON"
 echo "Eval train data: $EVAL_TRAIN_JSON"
 echo "Benchmark data: $BENCHMARK_JSON"
 echo "Ignore whitespace in Chinese exact-match eval: $IGNORE_SPACES"
+echo "Prune scope: $PRUNE_SCOPE"
 
 REGULAR_TRAIN_ARGS=(
   scripts/scenic_train_chatlm_sft.py
@@ -304,6 +307,7 @@ run_prune_suite() {
       REPORT_JSON="$METHOD_REPORT_JSON" \
       PRUNED_DIR="$METHOD_PRUNED_DIR" \
       NPROC_PER_NODE="$NPROC_PER_NODE" \
+      PRUNE_SCOPE="$PRUNE_SCOPE" \
       bash scripts/run_prune_eval_50.sh "$model_dir" "${EVAL_EXTRA_ARGS[@]}"
     MULTI_AGG_ARGS+=(--report "${model_label}:${METHOD_KEY}=${METHOD_REPORT_JSON}")
   done

@@ -227,6 +227,8 @@ bash scripts/run_prune_eval_50.sh models/chatlm_scenic_triplet_sft \
 
 `scripts/scenic_prune_eval.py` supports `magnitude`, `gradient`, `wanda`, and NVIDIA `2:4` pruning. The report stores `accuracy` as exact-match@1 so you can verify the checkpoint you passed in before comparing the pruned model.
 
+By default, the prune/eval launchers use `PRUNE_SCOPE=encoder-linear`, matching the reference pruning runs that prune only encoder linear layers and leave decoder/output layers intact. Set `PRUNE_SCOPE=all-linear` only when you intentionally want the much harsher encoder+decoder pruning experiment.
+
 To run the full pipeline from the base ChatLM model in one command, use:
 
 ```bash
