@@ -229,6 +229,16 @@ bash scripts/run_prune_eval_50.sh models/chatlm_scenic_triplet_sft \
 
 By default, the prune/eval launchers use `PRUNE_SCOPE=encoder-linear`, matching the reference pruning runs that prune only encoder linear layers and leave decoder/output layers intact. Set `PRUNE_SCOPE=all-linear` only when you intentionally want the much harsher encoder+decoder pruning experiment.
 
+After a run finishes, verify both full-model and targeted linear sparsity with:
+
+```bash
+python scripts/check_pruned_model_sparsity.py \
+  --report-json prune_eval_outputs/<run>/all_sft_contrastive_pruning_em_report.json \
+  --output-json prune_eval_outputs/<run>/sparsity_check.json
+```
+
+For encoder-only pruning, `expected_scope_is_50_percent_sparse` should be true, while `full_model_is_50_percent_sparse` will usually be false because decoder/output parameters are intentionally left dense.
+
 To run the full pipeline from the base ChatLM model in one command, use:
 
 ```bash
