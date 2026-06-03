@@ -13,6 +13,7 @@ Useful env overrides:
   OUTPUT_ROOT=prune_eval_outputs/my_run
   CONTRASTIVE_OUTPUT_DIR=models/chatlm_scenic_triplet_sft_5epoch
   FINAL_JSON=prune_eval_outputs/my_run/all_pruning_em_report.json
+  SPARSITY_CHECK_JSON=prune_eval_outputs/my_run/sparsity_check.json
   NPROC_PER_NODE=8
   LOCAL_BASE_MODEL_DIR=prune_eval_outputs/my_run/base_model
   LOCAL_FILES_ONLY=1        # force local/offline base model loading
@@ -20,6 +21,7 @@ Useful env overrides:
   IGNORE_SPACES=1           # default for Chinese EM; set 0 for strict whitespace-sensitive EM
   PRUNE_SCOPE=all-linear      # default for true full-model 50% sparsity
   SPARSITY_BASIS=full-model   # default: make the whole checkpoint 50% sparse
+  SKIP_SPARSITY_CHECK=1     # optional: skip final sparsity verification
   SKIP_TRAIN=1              # reuse CONTRASTIVE_OUTPUT_DIR and only prune/eval
 USAGE
 }
@@ -61,6 +63,7 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-prune_eval_outputs/${SAFE_BASE}_contrastive5_all50_$
 LOCAL_BASE_MODEL_DIR="${LOCAL_BASE_MODEL_DIR:-${OUTPUT_ROOT}/base_model}"
 CONTRASTIVE_OUTPUT_DIR="${CONTRASTIVE_OUTPUT_DIR:-${OUTPUT_ROOT}/contrastive_sft_5epoch}"
 FINAL_JSON="${FINAL_JSON:-${OUTPUT_ROOT}/all_pruning_em_report.json}"
+SPARSITY_CHECK_JSON="${SPARSITY_CHECK_JSON:-${OUTPUT_ROOT}/sparsity_check.json}"
 IGNORE_SPACES="${IGNORE_SPACES:-1}"
 
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-8}"
@@ -176,6 +179,7 @@ echo "Base model: $BASE_MODEL"
 echo "Training model path: $TRAIN_MODEL"
 echo "Contrastive output: $CONTRASTIVE_OUTPUT_DIR"
 echo "Final all-method JSON: $FINAL_JSON"
+echo "Sparsity check JSON: $SPARSITY_CHECK_JSON"
 echo "NPROC_PER_NODE: $NPROC_PER_NODE"
 echo "LOCAL_FILES_ONLY for base model: $USE_LOCAL_FILES_ONLY"
 echo "Contrastive train data: $CONTRASTIVE_TRAIN_JSON"
@@ -269,4 +273,17 @@ done
   --sparsity "$SPARSITY" \
   "${AGG_REPORT_ARGS[@]}"
 
+if [[ "${SKIP_SPARSITY_CHECK:-0}" == "1" ]]; then
+  echo "SKIP_SPARSITY_CHECK=1; skipping final sparsity verification."
+else
+  "$PYTHON" scripts/check_pruned_model_sparsity.py \
+    --report-json "$FINAL_JSON" \
+    --output-json "$SPARSITY_CHECK_JSON" \
+    --expected-sparsity "$SPARSITY" \
+    --default-prune-scope "$PRUNE_SCOPE" \
+    --default-sparsity-basis "$SPARSITY_BASIS" \
+    --fail-on-mismatch
+fi
+
 echo "Done. All EM@1/EM@5 results are in: $FINAL_JSON"
+echo "Sparsity verification is in: $SPARSITY_CHECK_JSON"

@@ -229,7 +229,7 @@ bash scripts/run_prune_eval_50.sh models/chatlm_scenic_triplet_sft \
 
 By default, the prune/eval launchers now use `SPARSITY_BASIS=full-model` and `PRUNE_SCOPE=all-linear`, so `SPARSITY=0.5` targets 50% sparsity across the whole loaded checkpoint, not only the selected encoder weights. For the older reference-style encoder-only run, set `SPARSITY_BASIS=targeted-linear PRUNE_SCOPE=encoder-linear`.
 
-After a run finishes, verify both full-model and targeted linear sparsity with:
+The all-in-one launchers run this sparsity check automatically at the end and write `sparsity_check.json` in the run directory. To verify a run manually, use:
 
 ```bash
 python scripts/check_pruned_model_sparsity.py \
@@ -255,7 +255,7 @@ To run the full pipeline from the base ChatLM model in one command, use:
 bash scripts/run_contrastive_5epoch_all_prune_50.sh charent/ChatLM-mini-Chinese
 ```
 
-This trains contrastive triplet SFT for 5 epochs, then runs 50% `magnitude`, `wanda`, `gradient`, and NVIDIA `2:4` pruning. It writes one final JSON at `prune_eval_outputs/<run>/all_pruning_em_report.json` with benchmark and training-set EM@1/EM@5 for the original contrastive model and each pruned model. If you already have the base model downloaded locally, pass that directory or force offline loading with `LOCAL_FILES_ONLY=1`.
+This trains contrastive triplet SFT for 5 epochs, then runs 50% `magnitude`, `wanda`, `gradient`, and NVIDIA `2:4` pruning. It writes one final JSON at `prune_eval_outputs/<run>/all_pruning_em_report.json` with benchmark and training-set EM@1/EM@5 for the original contrastive model and each pruned model, then writes `sparsity_check.json` and fails the shell if any generated pruned checkpoint is not at the expected 50% sparsity basis. If you already have the base model downloaded locally, pass that directory or force offline loading with `LOCAL_FILES_ONLY=1`.
 
 To train and compare both regular SFT and contrastive SFT from the same original ChatLM Hugging Face id, use:
 
@@ -263,7 +263,7 @@ To train and compare both regular SFT and contrastive SFT from the same original
 bash scripts/run_sft_contrastive_5epoch_all_prune_50.sh charent/ChatLM-mini-Chinese
 ```
 
-This uses `data/SCENIC_full_training_dataset.json` for regular SFT and evaluation, `data/SCENIC_full_anchor_positive_negative.json` for contrastive SFT, and `generated/iot_instruction_benchmark_200.json` for benchmark EM. It writes one combined JSON at `prune_eval_outputs/<run>/all_sft_contrastive_pruning_em_report.json`.
+This uses `data/SCENIC_full_training_dataset.json` for regular SFT and evaluation, `data/SCENIC_full_anchor_positive_negative.json` for contrastive SFT, and `generated/iot_instruction_benchmark_200.json` for benchmark EM. It writes one combined JSON at `prune_eval_outputs/<run>/all_sft_contrastive_pruning_em_report.json`, then writes `sparsity_check.json` and fails the shell if any generated pruned checkpoint is not at the expected 50% sparsity basis.
 
 For Chinese command responses, the launcher uses whitespace-insensitive exact match by default (`IGNORE_SPACES=1`) so tokenizer-inserted spaces do not count as wrong actions. Set `IGNORE_SPACES=0` if you need strict string equality.
 

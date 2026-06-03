@@ -38,6 +38,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-dir", default=".", help="Base directory for relative paths in reports.")
     parser.add_argument("--output-json", default=None, help="Optional JSON output path.")
     parser.add_argument("--include-originals", action="store_true", help="Also check dense SFT model directories.")
+    parser.add_argument(
+        "--fail-on-mismatch",
+        action="store_true",
+        help="Exit non-zero unless every detected pruned model exists and matches the expected sparsity basis.",
+    )
     parser.add_argument("--expected-sparsity", type=float, default=0.5)
     parser.add_argument("--tolerance", type=float, default=0.01)
     parser.add_argument(
@@ -527,6 +532,17 @@ def main() -> None:
             )
             handle.write("\n")
         print(f"Wrote sparsity report: {output_path}")
+
+    if args.fail_on_mismatch:
+        if summary["ok_entries"] != summary["total_entries"]:
+            raise SystemExit(
+                "Sparsity check failed: "
+                f"only {summary['ok_entries']} of {summary['total_entries']} model entries were inspectable."
+            )
+        if not summary["all_existing_models_expected_basis_50_percent_sparse"]:
+            raise SystemExit(
+                "Sparsity check failed: at least one model did not match the expected sparsity basis."
+            )
 
 
 if __name__ == "__main__":
