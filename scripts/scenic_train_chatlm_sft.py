@@ -1092,6 +1092,8 @@ def tokenize_regular_examples_like_original(
 
 
 def make_seq2seq_training_args(config: RegularSFTConfig) -> Any:
+    import inspect
+
     from transformers import Seq2SeqTrainingArguments
 
     fp16 = config.fp16 and not config.bf16
@@ -1118,6 +1120,9 @@ def make_seq2seq_training_args(config: RegularSFTConfig) -> Any:
         kwargs["save_strategy"] = "no"
     else:
         kwargs["save_steps"] = config.save_every_steps
+
+    supported_kwargs = inspect.signature(Seq2SeqTrainingArguments.__init__).parameters
+    kwargs = {key: value for key, value in kwargs.items() if key in supported_kwargs}
     return Seq2SeqTrainingArguments(**kwargs)
 
 

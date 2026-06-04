@@ -15,6 +15,7 @@
 --extra-index-url https://download.pytorch.org/whl/cu128
 
 certifi==2026.5.20
+accelerate>=1.1.0
 huggingface_hub==1.17.0
 openai==2.38.0
 pytest==9.0.3
