@@ -14,7 +14,9 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from scenic_train_chatlm_sft import (
+    ContrastiveSFTConfig,
     TripletSFTModule,
+    model_load_dtype,
     model_for_save,
     repair_tokenizer_files_for_auto_load,
     sanitize_config_for_json,
@@ -62,6 +64,18 @@ def test_sanitize_tokenizer_for_save_converts_init_kwargs_dtypes() -> None:
 
     assert tokenizer.init_kwargs == {"torch_dtype": "bfloat16"}
     json.dumps(tokenizer.init_kwargs)
+
+
+def test_fp16_contrastive_keeps_default_model_load_dtype_for_grad_scaler() -> None:
+    config = ContrastiveSFTConfig(fp16=True, bf16=False)
+
+    assert model_load_dtype(config, torch.device("cuda")) is None
+
+
+def test_bf16_contrastive_uses_bfloat16_model_load_dtype() -> None:
+    config = ContrastiveSFTConfig(fp16=False, bf16=True)
+
+    assert model_load_dtype(config, torch.device("cuda")) == torch.bfloat16
 
 
 def test_repair_tokenizer_config_replaces_tokenizersbackend_from_source(tmp_path: Path) -> None:

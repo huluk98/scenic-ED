@@ -639,6 +639,8 @@ def load_chatlm_stack(config: RegularSFTConfig, state: DistributedState) -> tupl
     except Exception as exc:
         raise_model_load_error(config, exc)
 
+    if config.fp16 and not config.bf16:
+        model.float()
     if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -658,8 +660,9 @@ def model_load_dtype(config: RegularSFTConfig, device: Any) -> Any | None:
 
     if config.bf16:
         return torch.bfloat16
-    if config.fp16:
-        return torch.float16
+    # Keep fp16 training weights in the model's default precision and let
+    # autocast handle half-precision ops. Loading params as float16 gives
+    # GradScaler fp16 gradients, which PyTorch refuses to unscale.
     return None
 
 
