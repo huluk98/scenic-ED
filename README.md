@@ -209,6 +209,15 @@ python scripts/evaluate_original_chatlm.py \
   --output-json prune_eval_outputs/original_chatlm_eval_report.json
 ```
 
+To run the same baseline across all 8 NVIDIA H20 GPUs, use the launcher:
+
+```bash
+NPROC_PER_NODE=8 \
+bash scripts/run_original_chatlm_eval_8gpu.sh charent/ChatLM-mini-Chinese
+```
+
+The 8-GPU launcher downloads/materializes a Hugging Face model id into the run directory once, then evaluates that local copy with `torchrun`. Override `OUTPUT_ROOT` or `OUTPUT_JSON` if you want a fixed report path.
+
 The report includes benchmark/training EM@1 and EM@5 plus an `eos` block. By default the script ensures the tokenizer EOS id is present in both the model config and generation config before evaluation, then samples generated benchmark beams to check whether outputs terminate with EOS. Use `--local-files-only` with a local model path if the base model is already downloaded.
 
 ## 50% Prune And Evaluate
