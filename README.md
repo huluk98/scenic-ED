@@ -199,6 +199,18 @@ The training scripts now default to fp16. Set `PRECISION=bf16` for the shell lau
 
 The model path, dataset paths, and output directories can also be changed directly at the top of `scripts/scenic_train_chatlm_sft.py` or the contrastive-only `contrastive_sft.py`.
 
+## Original ChatLM Baseline
+
+To test the untouched Hugging Face ChatLM model on the same benchmark and full training dataset, run:
+
+```bash
+python scripts/evaluate_original_chatlm.py \
+  --model charent/ChatLM-mini-Chinese \
+  --output-json prune_eval_outputs/original_chatlm_eval_report.json
+```
+
+The report includes benchmark/training EM@1 and EM@5 plus an `eos` block. By default the script ensures the tokenizer EOS id is present in both the model config and generation config before evaluation, then samples generated benchmark beams to check whether outputs terminate with EOS. Use `--local-files-only` with a local model path if the base model is already downloaded.
+
 ## 50% Prune And Evaluate
 
 After regular SFT or contrastive SFT finishes, run a 50% prune/eval pass with one model path:
