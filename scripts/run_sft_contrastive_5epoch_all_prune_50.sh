@@ -60,6 +60,7 @@ CALIBRATION_JSON="${CALIBRATION_JSON:-$EVAL_TRAIN_JSON}"
 PRUNE_METHODS="${PRUNE_METHODS:-magnitude wanda gradient nvidia24}"
 PRUNE_SCOPE="${PRUNE_SCOPE:-all-linear}"
 SPARSITY_BASIS="${SPARSITY_BASIS:-targeted-linear}"
+PRUNE_LM_HEAD="${PRUNE_LM_HEAD:-0}"
 SAFE_BASE="$(basename "$BASE_MODEL" | tr -c 'A-Za-z0-9_.-' '_')"
 SAFE_BASE="${SAFE_BASE%_}"
 SAFE_BASE="${SAFE_BASE:-chatlm}"
@@ -261,6 +262,7 @@ echo "Benchmark data: $BENCHMARK_JSON"
 echo "Ignore whitespace in Chinese exact-match eval: $IGNORE_SPACES"
 echo "Prune scope: $PRUNE_SCOPE"
 echo "Sparsity basis: $SPARSITY_BASIS"
+echo "Prune lm_head: $PRUNE_LM_HEAD"
 
 REGULAR_TRAIN_ARGS=(
   scripts/scenic_train_chatlm_sft.py
@@ -382,6 +384,7 @@ run_prune_suite() {
       NPROC_PER_NODE="$NPROC_PER_NODE" \
       PRUNE_SCOPE="$PRUNE_SCOPE" \
       SPARSITY_BASIS="$SPARSITY_BASIS" \
+      PRUNE_LM_HEAD="$PRUNE_LM_HEAD" \
       bash scripts/run_prune_eval_50.sh "$model_dir" "${EVAL_EXTRA_ARGS[@]}"
     MULTI_AGG_ARGS+=(--report "${model_label}:${METHOD_KEY}=${METHOD_REPORT_JSON}")
   done

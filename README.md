@@ -245,6 +245,23 @@ By default, the prune/eval launchers now use `SPARSITY_BASIS=targeted-linear` an
 
 For unstructured `magnitude`, `gradient`, and `wanda`, pruning is per selected linear layer, so each pruned layer lands near the requested sparsity instead of borrowing zeros from another layer. NVIDIA `2:4` remains structured by definition, so eligible linear weights are pruned with the 2-of-4 pattern; the final sparsity check reports any layer that does not reach the expected 50%.
 
+### Legacy lm_head Full-Linear Fallback
+
+If the protected-`lm_head` run underperforms, use the isolated legacy launcher to reproduce the earlier full-linear 50% workflow:
+
+```bash
+bash scripts/run_sft_contrastive_5epoch_all_prune_50_legacy_lm_head.sh charent/ChatLM-mini-Chinese
+```
+
+To reuse the latest legacy run and only redo pruning/eval:
+
+```bash
+REUSE_LAST_RUN=1 SKIP_TRAIN=1 \
+bash scripts/run_sft_contrastive_5epoch_all_prune_50_legacy_lm_head.sh charent/ChatLM-mini-Chinese
+```
+
+This wrapper sets `PRUNE_LM_HEAD=1`, `PRUNE_SCOPE=all-linear`, and `SPARSITY_BASIS=targeted-linear`, then writes into a separate `*_legacy_lm_head_*` run directory. On ChatLM-mini-Chinese it should prune 161 targeted linear layers, including `lm_head`, and land near 50% full-checkpoint sparsity. The default protected-head workflow should prune 160 targeted linear layers and land near 44% full-checkpoint sparsity. New legacy reports record this automatically; for older reports without `prune_lm_head` metadata, pass `--include-lm-head` to `scripts/check_pruned_model_sparsity.py` when manually verifying.
+
 The all-in-one launchers run this sparsity check automatically at the end and write `sparsity_check.json` in the run directory. To verify a run manually, use:
 
 ```bash

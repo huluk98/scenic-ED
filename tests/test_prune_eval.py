@@ -227,6 +227,11 @@ def test_sparsity_checker_does_not_count_lm_head_as_target_linear() -> None:
     assert not looks_like_linear_weight("model.lm_head.weight", 2)
 
 
+def test_sparsity_checker_can_count_lm_head_for_legacy_full_linear_runs() -> None:
+    assert looks_like_linear_weight("lm_head.weight", 2, include_lm_head=True)
+    assert looks_like_linear_weight("model.lm_head.weight", 2, include_lm_head=True)
+
+
 def test_wanda_prune_sets_half_of_linear_weights_to_zero() -> None:
     model = TinySeq2Seq()
     with torch.no_grad():
