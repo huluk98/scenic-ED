@@ -37,11 +37,21 @@ DEFAULT_MODEL = "charent/ChatLM-mini-Chinese"
 DEFAULT_OUTPUT_JSON = PROJECT_ROOT / "prune_eval_outputs" / "original_chatlm_eval_report.json"
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate the original Hugging Face ChatLM model on SCENIC benchmark and training data."
     )
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="Original Hugging Face model id or local model path.")
+    parser.add_argument(
+        "model_path_or_hf_id",
+        nargs="?",
+        default=None,
+        help=f"Original Hugging Face model id or local path. Defaults to {DEFAULT_MODEL}.",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Compatibility alias for the original Hugging Face model id or local model path.",
+    )
     parser.add_argument("--train-json", default=str(DEFAULT_TRAIN_JSON))
     parser.add_argument("--benchmark-json", default=str(DEFAULT_BENCHMARK_JSON))
     parser.add_argument("--output-json", default=str(DEFAULT_OUTPUT_JSON))
@@ -76,7 +86,11 @@ def parse_args() -> argparse.Namespace:
         default=16,
         help="Number of benchmark prompts used to verify generated sequences terminate with EOS.",
     )
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.model_path_or_hf_id and args.model:
+        parser.error("Provide the model once, either as the positional argument or with --model.")
+    args.model = args.model or args.model_path_or_hf_id or DEFAULT_MODEL
+    return args
 
 
 def eos_values(value: Any) -> list[int]:

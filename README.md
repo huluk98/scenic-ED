@@ -205,7 +205,7 @@ To test the untouched Hugging Face ChatLM model on the same benchmark and full t
 
 ```bash
 python scripts/evaluate_original_chatlm.py \
-  --model charent/ChatLM-mini-Chinese \
+  charent/ChatLM-mini-Chinese \
   --output-json prune_eval_outputs/original_chatlm_eval_report.json
 ```
 

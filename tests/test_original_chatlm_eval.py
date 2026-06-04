@@ -13,10 +13,30 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from evaluate_original_chatlm import (  # noqa: E402
+    DEFAULT_MODEL,
     eos_contains,
     eos_diagnostics,
     generated_sequence_ended_with_eos,
+    parse_args,
 )
+
+
+def test_parse_args_accepts_huggingface_model_id_as_only_argument() -> None:
+    args = parse_args(["charent/ChatLM-mini-Chinese"])
+
+    assert args.model == "charent/ChatLM-mini-Chinese"
+
+
+def test_parse_args_defaults_to_chatlm_mini_chinese() -> None:
+    args = parse_args([])
+
+    assert args.model == DEFAULT_MODEL
+
+
+def test_parse_args_keeps_model_flag_for_compatibility() -> None:
+    args = parse_args(["--model", "local/chatlm"])
+
+    assert args.model == "local/chatlm"
 
 
 def test_eos_diagnostics_fills_missing_model_and_generation_eos() -> None:
