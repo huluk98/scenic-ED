@@ -52,6 +52,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Compatibility alias for the original Hugging Face model id or local model path.",
     )
+    parser.add_argument(
+        "--source-model-id",
+        default=None,
+        help="Optional original Hugging Face id to record when evaluating a local materialized copy.",
+    )
     parser.add_argument("--train-json", default=str(DEFAULT_TRAIN_JSON))
     parser.add_argument("--benchmark-json", default=str(DEFAULT_BENCHMARK_JSON))
     parser.add_argument("--output-json", default=str(DEFAULT_OUTPUT_JSON))
@@ -89,8 +94,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.model_path_or_hf_id and args.model:
         parser.error("Provide the model once, either as the positional argument or with --model.")
-    args.model = args.model or args.model_path_or_hf_id or DEFAULT_MODEL
+    args.model = normalize_model_arg(args.model or args.model_path_or_hf_id or DEFAULT_MODEL)
     return args
+
+
+def normalize_model_arg(value: str) -> str:
+    path = Path(value).expanduser()
+    if path.exists():
+        return str(path.resolve())
+    return value
 
 
 def eos_values(value: Any) -> list[int]:
@@ -285,6 +297,8 @@ def evaluate_original_chatlm(args: argparse.Namespace) -> dict[str, Any] | None:
         if state.is_main:
             output_json.parent.mkdir(parents=True, exist_ok=True)
             rank0_print(state, f"Original model: {args.model}")
+            if args.source_model_id:
+                rank0_print(state, f"Source Hugging Face id: {args.source_model_id}")
             rank0_print(state, f"Single JSON report: {output_json}")
 
         tokenizer, model = load_model_and_tokenizer(args, args.model, state)
@@ -305,6 +319,7 @@ def evaluate_original_chatlm(args: argparse.Namespace) -> dict[str, Any] | None:
         report = {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "model_path": args.model,
+            "source_model_id": args.source_model_id,
             "output_json": str(output_json),
             "original_huggingface_model": True,
             "eos": {

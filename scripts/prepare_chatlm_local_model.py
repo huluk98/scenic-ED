@@ -21,6 +21,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cache-dir", default=None, help="Defaults to HF_HOME/hub or ~/.cache/huggingface/hub.")
     parser.add_argument("--modules-dir", default=None, help="Defaults to HF_MODULES_CACHE or ~/.cache/huggingface/modules.")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT))
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit nonzero when required custom remote-code files are missing after materialization.",
+    )
     return parser.parse_args()
 
 
@@ -135,7 +140,10 @@ def main() -> None:
     hub_cache = Path(args.cache_dir).expanduser() if args.cache_dir else default_hub_cache()
     modules_cache = Path(args.modules_dir).expanduser() if args.modules_dir else default_modules_cache()
     output_dir = Path(args.output_dir).expanduser().resolve()
-    snapshot = find_best_snapshot(args.model_id, hub_cache)
+    try:
+        snapshot = find_best_snapshot(args.model_id, hub_cache)
+    except FileNotFoundError as exc:
+        raise SystemExit(str(exc)) from exc
 
     copy_snapshot(snapshot, output_dir)
     copied = copy_custom_code(args.model_id, output_dir, modules_cache)
@@ -148,6 +156,8 @@ def main() -> None:
     if missing:
         print(f"Missing custom code files: {', '.join(missing)}")
         print("If this list is non-empty, copy those .py files from another machine that can download the model.")
+        if args.strict:
+            raise SystemExit(3)
     print()
     print("Use:")
     print("export HF_HUB_OFFLINE=1")

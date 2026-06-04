@@ -216,7 +216,22 @@ NPROC_PER_NODE=8 \
 bash scripts/run_original_chatlm_eval_8gpu.sh charent/ChatLM-mini-Chinese
 ```
 
-The 8-GPU launcher downloads/materializes a Hugging Face model id into the run directory once, then evaluates that local copy with `torchrun`. Override `OUTPUT_ROOT` or `OUTPUT_JSON` if you want a fixed report path.
+If Hugging Face download/cache access is failing with `LocalEntryNotFoundError` or SSL EOF errors, point the launcher at the local model directory instead:
+
+```bash
+NPROC_PER_NODE=8 \
+bash scripts/run_original_chatlm_eval_8gpu.sh /path/to/ChatLM-mini-Chinese
+```
+
+You can also keep the source id in the report while evaluating a local folder:
+
+```bash
+HF_MODEL_PATH=/path/to/ChatLM-mini-Chinese \
+NPROC_PER_NODE=8 \
+bash scripts/run_original_chatlm_eval_8gpu.sh charent/ChatLM-mini-Chinese
+```
+
+The 8-GPU launcher now tries paths in this order: a local first argument, `HF_MODEL_PATH`, a self-contained copy built from the local Hugging Face cache, then network download when `LOCAL_FILES_ONLY=0` or the default `auto` permits it. Set `LOCAL_FILES_ONLY=1` to force offline/local-only evaluation. Override `OUTPUT_ROOT` or `OUTPUT_JSON` if you want a fixed report path.
 
 The report includes benchmark/training EM@1 and EM@5 plus an `eos` block. By default the script ensures the tokenizer EOS id is present in both the model config and generation config before evaluation, then samples generated benchmark beams to check whether outputs terminate with EOS. Use `--local-files-only` with a local model path if the base model is already downloaded.
 

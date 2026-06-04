@@ -8,12 +8,17 @@ Usage:
 
 Example:
   bash scripts/run_original_chatlm_eval_8gpu.sh charent/ChatLM-mini-Chinese
+  bash scripts/run_original_chatlm_eval_8gpu.sh /path/to/ChatLM-mini-Chinese
+  HF_MODEL_PATH=/path/to/ChatLM-mini-Chinese bash scripts/run_original_chatlm_eval_8gpu.sh charent/ChatLM-mini-Chinese
 
 Useful env overrides:
   NPROC_PER_NODE=8          # default: auto-detect NVIDIA GPUs
   OUTPUT_ROOT=prune_eval_outputs/original_chatlm_baseline
   OUTPUT_JSON=prune_eval_outputs/original_chatlm_baseline/original_chatlm_eval_report.json
   LOCAL_BASE_MODEL_DIR=prune_eval_outputs/original_chatlm_baseline/base_model
+  HF_MODEL_PATH=/abs/path   # local model dir to evaluate while recording the first arg as the source id
+  SOURCE_MODEL_ID=charent/ChatLM-mini-Chinese
+  PREFER_HF_CACHE=1         # default: build LOCAL_BASE_MODEL_DIR from the HF cache before trying network
   LOCAL_FILES_ONLY=1        # force local/offline model loading
   LOCAL_FILES_ONLY=0        # allow Hugging Face download/materialization
   BF16=1                    # default on NVIDIA GPUs
@@ -32,6 +37,12 @@ shift
 cd "$(dirname "$0")/.."
 
 PYTHON="${PYTHON:-python}"
+if [[ "$BASE_MODEL" == "~/"* ]]; then
+  BASE_MODEL="${HOME}/${BASE_MODEL#~/}"
+fi
+if [[ "${HF_MODEL_PATH:-}" == "~/"* ]]; then
+  HF_MODEL_PATH="${HOME}/${HF_MODEL_PATH#~/}"
+fi
 SAFE_BASE="$(basename "$BASE_MODEL" | tr -c 'A-Za-z0-9_.-' '_')"
 SAFE_BASE="${SAFE_BASE%_}"
 SAFE_BASE="${SAFE_BASE:-chatlm}"
@@ -55,17 +66,38 @@ detect_nproc() {
 download_hf_model() {
   local model_id="$1"
   local output_dir="$2"
+  local tried=0
   if command -v hf >/dev/null 2>&1; then
-    hf download "$model_id" --local-dir "$output_dir"
-    return
+    tried=1
+    if hf download "$model_id" --local-dir "$output_dir"; then
+      return 0
+    fi
   fi
   if command -v huggingface-cli >/dev/null 2>&1; then
-    huggingface-cli download "$model_id" --local-dir "$output_dir"
-    return
+    tried=1
+    if huggingface-cli download "$model_id" --local-dir "$output_dir"; then
+      return 0
+    fi
+  fi
+  if [[ "$tried" -eq 1 ]]; then
+    echo "Hugging Face download failed for '$model_id'." >&2
+    echo "If this was an SSL/cache error, pass a local model dir as the first argument or set HF_MODEL_PATH=/path/to/model." >&2
+    return 1
   fi
   echo "The Hugging Face CLI is required to materialize HF model id '$model_id' into a local directory." >&2
   echo "Install huggingface_hub so the 'hf' command is available, or pass a local model directory instead." >&2
-  exit 2
+  return 1
+}
+
+materialize_from_cache() {
+  local model_id="$1"
+  local output_dir="$2"
+  mkdir -p "$OUTPUT_ROOT"
+  echo "Trying local Hugging Face cache for '$model_id'..."
+  "$PYTHON" scripts/prepare_chatlm_local_model.py \
+    --model-id "$model_id" \
+    --output-dir "$output_dir" \
+    --strict
 }
 
 NPROC_PER_NODE="${NPROC_PER_NODE:-$(detect_nproc)}"
@@ -94,13 +126,61 @@ case "${LOCAL_FILES_ONLY:-auto}" in
     ;;
 esac
 
+case "${PREFER_HF_CACHE:-1}" in
+  1|true|TRUE|yes|YES)
+    PREFER_HF_CACHE=1
+    ;;
+  0|false|FALSE|no|NO)
+    PREFER_HF_CACHE=0
+    ;;
+  *)
+    echo "PREFER_HF_CACHE must be 1 or 0." >&2
+    exit 2
+    ;;
+esac
+
 EVAL_MODEL="$BASE_MODEL"
-if [[ ! -d "$BASE_MODEL" && "$USE_LOCAL_FILES_ONLY" -eq 0 ]]; then
+SOURCE_MODEL_ID="${SOURCE_MODEL_ID:-}"
+if [[ -n "${HF_MODEL_PATH:-}" ]]; then
+  if [[ ! -d "$HF_MODEL_PATH" ]]; then
+    echo "HF_MODEL_PATH is set but is not a directory: $HF_MODEL_PATH" >&2
+    exit 2
+  fi
+  SOURCE_MODEL_ID="${SOURCE_MODEL_ID:-$BASE_MODEL}"
+  EVAL_MODEL="$HF_MODEL_PATH"
+  USE_LOCAL_FILES_ONLY=1
+elif [[ -d "$BASE_MODEL" ]]; then
+  EVAL_MODEL="$BASE_MODEL"
+  USE_LOCAL_FILES_ONLY=1
+elif [[ "$PREFER_HF_CACHE" -eq 1 ]]; then
+  if materialize_from_cache "$BASE_MODEL" "$LOCAL_BASE_MODEL_DIR"; then
+    EVAL_MODEL="$LOCAL_BASE_MODEL_DIR"
+    SOURCE_MODEL_ID="${SOURCE_MODEL_ID:-$BASE_MODEL}"
+    USE_LOCAL_FILES_ONLY=1
+  else
+    echo "No complete local cache copy was available for '$BASE_MODEL'." >&2
+    if [[ "$USE_LOCAL_FILES_ONLY" -eq 1 ]]; then
+      echo "Run with a local model directory, set HF_MODEL_PATH=/path/to/model, or allow download with LOCAL_FILES_ONLY=0." >&2
+      exit 2
+    fi
+  fi
+fi
+
+if [[ "$EVAL_MODEL" == "$BASE_MODEL" && "$USE_LOCAL_FILES_ONLY" -eq 0 ]]; then
   mkdir -p "$LOCAL_BASE_MODEL_DIR"
   echo "Downloading/materializing base model '$BASE_MODEL' into: $LOCAL_BASE_MODEL_DIR"
-  download_hf_model "$BASE_MODEL" "$LOCAL_BASE_MODEL_DIR"
+  if ! download_hf_model "$BASE_MODEL" "$LOCAL_BASE_MODEL_DIR"; then
+    exit 2
+  fi
   EVAL_MODEL="$LOCAL_BASE_MODEL_DIR"
+  SOURCE_MODEL_ID="${SOURCE_MODEL_ID:-$BASE_MODEL}"
   USE_LOCAL_FILES_ONLY=1
+fi
+
+if [[ "$EVAL_MODEL" == "$BASE_MODEL" && "$USE_LOCAL_FILES_ONLY" -eq 1 && ! -d "$EVAL_MODEL" ]]; then
+  echo "Cannot evaluate Hugging Face id '$BASE_MODEL' with LOCAL_FILES_ONLY=1 because no local directory was found." >&2
+  echo "Use: HF_MODEL_PATH=/path/to/ChatLM-mini-Chinese bash scripts/run_original_chatlm_eval_8gpu.sh $BASE_MODEL" >&2
+  exit 2
 fi
 
 LOCAL_ARGS=()
@@ -145,15 +225,22 @@ mkdir -p "$OUTPUT_ROOT"
 
 echo "Original ChatLM baseline model: $BASE_MODEL"
 echo "Evaluation model path: $EVAL_MODEL"
+echo "Source model id: ${SOURCE_MODEL_ID:-<not recorded>}"
 echo "Output JSON: $OUTPUT_JSON"
 echo "NPROC_PER_NODE: $NPROC_PER_NODE"
 echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-<unset>}"
 echo "LOCAL_FILES_ONLY for eval model: $USE_LOCAL_FILES_ONLY"
 
+SOURCE_ARGS=()
+if [[ -n "$SOURCE_MODEL_ID" ]]; then
+  SOURCE_ARGS+=(--source-model-id "$SOURCE_MODEL_ID")
+fi
+
 COMMON_ARGS=(
   scripts/evaluate_original_chatlm.py
   "$EVAL_MODEL"
   --output-json "$OUTPUT_JSON"
+  "${SOURCE_ARGS[@]}"
   "${LOCAL_ARGS[@]}"
   "${PRECISION_ARGS[@]}"
 )
