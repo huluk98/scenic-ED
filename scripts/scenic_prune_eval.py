@@ -106,17 +106,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sparsity-basis",
         choices=("full-model", "targeted-linear"),
-        default="full-model",
+        default="targeted-linear",
         help=(
-            "Use full-model to make the whole checkpoint reach --sparsity. "
-            "Use targeted-linear for the older behavior where --sparsity applies only to selected linear weights."
+            "Use targeted-linear to apply --sparsity to each selected linear layer. "
+            "Use full-model only for legacy whole-checkpoint sparsity reporting."
         ),
     )
     parser.add_argument(
         "--prune-scope",
         choices=("encoder-linear", "decoder-linear", "all-linear"),
         default="all-linear",
-        help="Linear module scope to prune. Defaults to all-linear so full-model sparsity can reach 50 percent.",
+        help="Linear module scope to prune. Defaults to all-linear.",
     )
     parser.add_argument(
         "--full-model-correction",
@@ -704,96 +704,90 @@ def sanitize_pruning_score(score: torch.Tensor) -> torch.Tensor:
     )
 
 
-def prune_weight_scores_globally(
+def prune_weight_scores_per_layer(
     weight_scores: list[tuple[torch.Tensor, torch.Tensor]],
-    target_zero_count: int,
+    sparsity: float,
 ) -> dict[str, Any]:
+    sparsity = max(0.0, min(1.0, float(sparsity)))
     weights = [weight for weight, _ in weight_scores]
     before = count_parameter_tensors(weights)
-    additional_zero_count = target_zero_count - before["zero_parameter_count"]
-    if additional_zero_count <= 0:
-        return {
-            "pruning_granularity": "global-selected-weights",
-            "target_candidate_zero_count": target_zero_count,
-            "candidate_zero_count_before": before["zero_parameter_count"],
-            "candidate_zero_count_after": before["zero_parameter_count"],
-            "additional_zero_count": 0,
-            "pruned_weight_count": 0,
-        }
+    layer_summaries: list[dict[str, Any]] = []
+    total_target_zero_count = 0
+    total_additional_zero_count = 0
+    total_pruned = 0
 
-    score_chunks: list[torch.Tensor] = []
-    active_total = 0
-    for weight, score in weight_scores:
-        data = weight.data
-        if score.shape != data.shape:
-            raise ValueError(f"Score shape {tuple(score.shape)} does not match weight shape {tuple(data.shape)}.")
-        active = data.ne(0)
-        active_count = int(active.sum().item())
-        if active_count == 0:
-            continue
-        active_total += active_count
-        score_chunks.append(sanitize_pruning_score(score)[active].cpu())
+    with torch.no_grad():
+        for layer_index, (weight, score) in enumerate(weight_scores):
+            data = weight.data
+            if score.shape != data.shape:
+                raise ValueError(f"Score shape {tuple(score.shape)} does not match weight shape {tuple(data.shape)}.")
 
-    if additional_zero_count > active_total:
-        raise ValueError(
-            f"Cannot prune {additional_zero_count} additional weights; only {active_total} active candidates exist."
-        )
-    if not score_chunks:
-        return {
-            "pruning_granularity": "global-selected-weights",
-            "target_candidate_zero_count": target_zero_count,
-            "candidate_zero_count_before": before["zero_parameter_count"],
-            "candidate_zero_count_after": before["zero_parameter_count"],
-            "additional_zero_count": additional_zero_count,
-            "pruned_weight_count": 0,
-        }
+            total = int(data.numel())
+            zero_before = int(data.eq(0).sum().item())
+            active = data.ne(0)
+            active_count = int(active.sum().item())
+            target_zero_count = int(round(sparsity * total))
+            additional_zero_count = max(0, target_zero_count - zero_before)
+            if additional_zero_count > active_count:
+                raise ValueError(
+                    f"Cannot prune layer {layer_index} to {sparsity:.4f} sparsity; "
+                    f"need {additional_zero_count} active weights but only {active_count} remain."
+                )
 
-    pruned = 0
-    if additional_zero_count == active_total:
-        with torch.no_grad():
-            for weight, _ in weight_scores:
-                active = weight.data.ne(0)
-                count = int(active.sum().item())
-                if count:
-                    weight.data[active] = 0
-                    pruned += count
-    else:
-        all_scores = torch.cat(score_chunks)
-        threshold = torch.kthvalue(all_scores, additional_zero_count).values.item()
-        with torch.no_grad():
-            for weight, score in weight_scores:
-                data = weight.data
+            pruned = 0
+            if additional_zero_count == active_count and active_count:
+                data[active] = 0
+                pruned = active_count
+            elif additional_zero_count > 0:
                 score_tensor = sanitize_pruning_score(score)
-                prune_mask = data.ne(0) & (score_tensor < threshold)
+                active_scores = score_tensor[active].detach().cpu()
+                threshold = torch.kthvalue(active_scores, additional_zero_count).values.item()
+                prune_mask = active & (score_tensor < threshold)
                 count = int(prune_mask.sum().item())
                 if count:
                     data[prune_mask] = 0
                     pruned += count
 
-            remaining = additional_zero_count - pruned
-            if remaining > 0:
-                for weight, score in weight_scores:
-                    if remaining <= 0:
-                        break
-                    data = weight.data
-                    score_tensor = sanitize_pruning_score(score)
+                remaining = additional_zero_count - pruned
+                if remaining > 0:
                     tie_mask = data.ne(0) & (score_tensor == threshold)
                     tie_indices = torch.nonzero(tie_mask.reshape(-1), as_tuple=False).flatten()
-                    if tie_indices.numel() == 0:
-                        continue
                     take = min(remaining, int(tie_indices.numel()))
-                    data.reshape(-1)[tie_indices[:take]] = 0
-                    pruned += take
-                    remaining -= take
+                    if take:
+                        data.reshape(-1)[tie_indices[:take]] = 0
+                        pruned += take
+
+            zero_after = int(data.eq(0).sum().item())
+            total_target_zero_count += target_zero_count
+            total_additional_zero_count += additional_zero_count
+            total_pruned += pruned
+            layer_summaries.append(
+                {
+                    "layer_index": layer_index,
+                    "weight_shape": list(data.shape),
+                    "target_zero_count": target_zero_count,
+                    "zero_count_before": zero_before,
+                    "zero_count_after": zero_after,
+                    "additional_zero_count": additional_zero_count,
+                    "pruned_weight_count": pruned,
+                    "sparsity_after": zero_after / total if total else 0.0,
+                }
+            )
 
     after = count_parameter_tensors(weights)
+    layer_sparsities = [item["sparsity_after"] for item in layer_summaries]
     return {
-        "pruning_granularity": "global-selected-weights",
-        "target_candidate_zero_count": target_zero_count,
+        "pruning_granularity": "per-linear-layer",
+        "target_candidate_zero_count": total_target_zero_count,
         "candidate_zero_count_before": before["zero_parameter_count"],
         "candidate_zero_count_after": after["zero_parameter_count"],
-        "additional_zero_count": additional_zero_count,
-        "pruned_weight_count": pruned,
+        "additional_zero_count": total_additional_zero_count,
+        "pruned_weight_count": total_pruned,
+        "per_layer_target_sparsity": sparsity,
+        "per_layer_sparsity_min": min(layer_sparsities) if layer_sparsities else 0.0,
+        "per_layer_sparsity_max": max(layer_sparsities) if layer_sparsities else 0.0,
+        "per_layer_sparsity_mean": sum(layer_sparsities) / len(layer_sparsities) if layer_sparsities else 0.0,
+        "per_layer": layer_summaries,
     }
 
 
@@ -926,15 +920,15 @@ def magnitude_prune(model: nn.Module, args: argparse.Namespace) -> dict[str, Any
         args,
         [module.weight for _, module in linear_modules],
     )
-    global_pruning = prune_weight_scores_globally(
+    layer_pruning = prune_weight_scores_per_layer(
         [(module.weight, module.weight.data.abs()) for _, module in linear_modules],
-        target_zero_count=int(basis_summary["candidate_required_zero_weight_count"]),
+        sparsity=effective_sparsity,
     )
     return finalize_pruning_summary(model, args, {
         "method": "magnitude",
         "sparsity": args.sparsity,
         **basis_summary,
-        **global_pruning,
+        **layer_pruning,
         "pruned_linear_layers": len(linear_modules),
     })
 
@@ -1031,15 +1025,15 @@ def gradient_prune(
         used_batches += 1
 
     model.zero_grad(set_to_none=True)
-    global_pruning = prune_weight_scores_globally(
+    layer_pruning = prune_weight_scores_per_layer(
         [(module.weight, score) for module, score in saliency.items()],
-        target_zero_count=int(basis_summary["candidate_required_zero_weight_count"]),
+        sparsity=effective_sparsity,
     )
     return finalize_pruning_summary(model, args, {
         "method": "gradient",
         "sparsity": args.sparsity,
         **basis_summary,
-        **global_pruning,
+        **layer_pruning,
         "calibration_examples": min(len(calibration_records), used_batches * args.calibration_batch_size),
         "calibration_batches": used_batches,
         "pruned_linear_layers": len(saliency),
@@ -1119,9 +1113,9 @@ def wanda_prune(
         args,
         [weight for weight, _ in weight_scores],
     )
-    global_pruning = prune_weight_scores_globally(
+    layer_pruning = prune_weight_scores_per_layer(
         weight_scores,
-        target_zero_count=int(basis_summary["candidate_required_zero_weight_count"]),
+        sparsity=effective_sparsity,
     )
 
     skipped_modules = skipped_non_tensor | skipped_shape_mismatch | skipped_prune_shape_mismatch
@@ -1129,7 +1123,7 @@ def wanda_prune(
         "method": "wanda",
         "sparsity": args.sparsity,
         **basis_summary,
-        **global_pruning,
+        **layer_pruning,
         "calibration_examples": min(len(calibration_records), used_batches * args.calibration_batch_size),
         "calibration_batches": used_batches,
         "pruned_linear_layers": len(weight_scores),

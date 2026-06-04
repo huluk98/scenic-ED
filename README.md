@@ -83,8 +83,8 @@ torchrun --standalone --nproc_per_node=8 scripts/scenic_train_chatlm_sft.py \
   --mode regular \
   --model models/ChatLM-mini-Chinese \
   --local-files-only \
-  --epochs 3 \
-  --bf16 \
+  --epochs 5 \
+  --fp16 \
   --batch-size 16
 ```
 
@@ -109,18 +109,20 @@ Then use the printed `models/ChatLM-mini-Chinese-local` path with `--local-files
 Run training:
 
 ```bash
-python3 scripts/scenic_train_chatlm_sft.py --mode regular --epochs 3
-python3 scripts/scenic_train_chatlm_sft.py --mode contrastive --epochs 3 --alignment-weight 0.1 --margin 0.5
-python3 contrastive_sft.py --epochs 3 --alignment-weight 0.1 --margin 0.5
+python3 scripts/scenic_train_chatlm_sft.py --mode regular
+python3 scripts/scenic_train_chatlm_sft.py --mode contrastive --alignment-weight 0.1 --margin 0.5
+python3 contrastive_sft.py --alignment-weight 0.1 --margin 0.5
 ```
+
+Regular SFT now follows the older `sf-2.py` recipe by default: 5 epochs, 256-token inputs, 128-token targets, fp16, fixed-length tokenization, step checkpoints every 500 steps, and final output in `sft5`.
 
 On a multi-GPU NVIDIA machine, launch with `torchrun`. `--batch-size` is per GPU, so this example has a global batch of `16 * 8 = 128` before gradient accumulation:
 
 ```bash
 torchrun --standalone --nproc_per_node=8 scripts/scenic_train_chatlm_sft.py \
   --mode regular \
-  --epochs 3 \
-  --bf16 \
+  --epochs 5 \
+  --fp16 \
   --batch-size 16 \
   --gradient-accumulation-steps 1 \
   --num-workers 4
@@ -131,8 +133,8 @@ Contrastive triplet SFT uses the same launcher:
 ```bash
 torchrun --standalone --nproc_per_node=8 scripts/scenic_train_chatlm_sft.py \
   --mode contrastive \
-  --epochs 3 \
-  --bf16 \
+  --epochs 5 \
+  --fp16 \
   --batch-size 8 \
   --gradient-accumulation-steps 1 \
   --alignment-weight 0.1 \
@@ -146,7 +148,7 @@ Or use the dedicated contrastive-only file:
 bash scripts/run_contrastive_sft_8gpu.sh
 ```
 
-For `contrastive_sft.py`, the model, dataset, and output paths are provided directly in the `MODEL_PATH`, `TRAIN_JSON`, and `OUTPUT_DIR` variables at the top of the file. By default it expects the local ChatLM model at `models/ChatLM-mini-Chinese-local`, trains from `data/SCENIC_full_anchor_positive_negative.json`, writes to `models/chatlm_scenic_triplet_sft`, uses bf16, and loads local files only.
+For `contrastive_sft.py`, the model, dataset, and output paths are provided directly in the `MODEL_PATH`, `TRAIN_JSON`, and `OUTPUT_DIR` variables at the top of the file. By default it expects the local ChatLM model at `models/ChatLM-mini-Chinese-local`, trains for 5 epochs from `data/SCENIC_full_anchor_positive_negative.json`, writes to `models/chatlm_scenic_triplet_sft`, uses fp16, and loads local files only.
 
 The triplet objective is pair-balanced: for each tuple it averages the anchor and positive generation losses, then adds `alignment_weight * max(0, margin + d(anchor, positive) - d(anchor, negative))` using cosine distance over L2-normalized encoder representations.
 
@@ -175,7 +177,7 @@ torchrun --standalone --nproc_per_node=8 scripts/scenic_train_chatlm_sft.py \
   --mode regular \
   --epochs 1 \
   --max-examples 128 \
-  --bf16 \
+  --fp16 \
   --batch-size 4
 ```
 
@@ -193,7 +195,7 @@ PY
 
 Single-process `python scripts/scenic_train_chatlm_sft.py ...` uses one GPU. Use `torchrun --nproc_per_node=8` to use all 8 H20 GPUs.
 
-For H20 speed, prefer `--bf16`. The trainer loads model weights in bfloat16 and pads batches to multiples of 8 when bf16/fp16 is enabled, matching the faster path used by the Encoder-Decoder training scripts.
+The training scripts now default to fp16. Set `PRECISION=bf16` for the shell launchers or pass `--bf16` directly if you want bfloat16 instead.
 
 The model path, dataset paths, and output directories can also be changed directly at the top of `scripts/scenic_train_chatlm_sft.py` or the contrastive-only `contrastive_sft.py`.
 
@@ -227,9 +229,9 @@ bash scripts/run_prune_eval_50.sh models/chatlm_scenic_triplet_sft \
 
 `scripts/scenic_prune_eval.py` supports `magnitude`, `gradient`, `wanda`, and NVIDIA `2:4` pruning. The report stores `accuracy` as exact-match@1 so you can verify the checkpoint you passed in before comparing the pruned model.
 
-By default, the prune/eval launchers now use `SPARSITY_BASIS=full-model` and `PRUNE_SCOPE=all-linear`, so `SPARSITY=0.5` targets 50% sparsity across the whole loaded checkpoint, not only the selected encoder weights. For the older reference-style encoder-only run, set `SPARSITY_BASIS=targeted-linear PRUNE_SCOPE=encoder-linear`.
+By default, the prune/eval launchers now use `SPARSITY_BASIS=targeted-linear` and `PRUNE_SCOPE=all-linear`, so `SPARSITY=0.5` targets 50% sparsity in each selected linear layer. For an encoder-only reference run, set `PRUNE_SCOPE=encoder-linear`.
 
-For unstructured `magnitude`, `gradient`, and `wanda`, pruning is global across the selected weights: one layer can be pruned less and another more as long as the whole checkpoint reaches the target sparsity. NVIDIA `2:4` remains structured by definition, so eligible linear weights are pruned with the 2-of-4 pattern and any needed full-model correction is reported separately.
+For unstructured `magnitude`, `gradient`, and `wanda`, pruning is per selected linear layer, so each pruned layer lands near the requested sparsity instead of borrowing zeros from another layer. NVIDIA `2:4` remains structured by definition, so eligible linear weights are pruned with the 2-of-4 pattern; the final sparsity check reports any layer that does not reach the expected 50%.
 
 The all-in-one launchers run this sparsity check automatically at the end and write `sparsity_check.json` in the run directory. To verify a run manually, use:
 
@@ -239,7 +241,7 @@ python scripts/check_pruned_model_sparsity.py \
   --output-json prune_eval_outputs/<run>/sparsity_check.json
 ```
 
-For the new full-model runs, `full_model_is_50_percent_sparse` should be true. For encoder-only reference runs, `expected_scope_is_50_percent_sparse` may be true while `full_model_is_50_percent_sparse` is false because decoder/output parameters are intentionally left dense.
+For the default per-layer runs, `expected_scope_is_50_percent_sparse` and `expected_scope_layers_are_50_percent_sparse` should both be true. `full_model_is_50_percent_sparse` may be false because embeddings, biases, and other non-linear parameters are intentionally left dense.
 
 To inspect active/nonzero parameters for one model path directly:
 
@@ -257,7 +259,7 @@ To run the full pipeline from the base ChatLM model in one command, use:
 bash scripts/run_contrastive_5epoch_all_prune_50.sh charent/ChatLM-mini-Chinese
 ```
 
-This trains contrastive triplet SFT for 5 epochs, then runs 50% `magnitude`, `wanda`, `gradient`, and NVIDIA `2:4` pruning. It writes one final JSON at `prune_eval_outputs/<run>/all_pruning_em_report.json` with benchmark and training-set EM@1/EM@5 for the original contrastive model and each pruned model, then writes `sparsity_check.json` and fails the shell if any generated pruned checkpoint is not at the expected 50% sparsity basis. If you already have the base model downloaded locally, pass that directory or force offline loading with `LOCAL_FILES_ONLY=1`.
+This trains contrastive triplet SFT for 5 epochs, then runs 50% per-layer `magnitude`, `wanda`, `gradient`, and NVIDIA `2:4` pruning. It writes one final JSON at `prune_eval_outputs/<run>/all_pruning_em_report.json` with benchmark and training-set EM@1/EM@5 for the original contrastive model and each pruned model, then writes `sparsity_check.json` and fails the shell if any generated pruned checkpoint is not at the expected 50% sparsity basis or per-layer check. If you already have the base model downloaded locally, pass that directory or force offline loading with `LOCAL_FILES_ONLY=1`.
 
 To train and compare both regular SFT and contrastive SFT from the same original ChatLM Hugging Face id, use:
 
@@ -265,7 +267,15 @@ To train and compare both regular SFT and contrastive SFT from the same original
 bash scripts/run_sft_contrastive_5epoch_all_prune_50.sh charent/ChatLM-mini-Chinese
 ```
 
-This uses `data/SCENIC_full_training_dataset.json` for regular SFT and evaluation, `data/SCENIC_full_anchor_positive_negative.json` for contrastive SFT, and `generated/iot_instruction_benchmark_200.json` for benchmark EM. It writes one combined JSON at `prune_eval_outputs/<run>/all_sft_contrastive_pruning_em_report.json`, then writes `sparsity_check.json` and fails the shell if any generated pruned checkpoint is not at the expected 50% sparsity basis.
+This uses `data/SCENIC_full_training_dataset.json` for regular SFT and evaluation, `data/SCENIC_full_anchor_positive_negative.json` for contrastive SFT, and `generated/iot_instruction_benchmark_200.json` for benchmark EM. It writes one combined JSON at `prune_eval_outputs/<run>/all_sft_contrastive_pruning_em_report.json`, then writes `sparsity_check.json` and fails the shell if any generated pruned checkpoint is not at the expected 50% sparsity basis or per-layer check.
+
+To reuse the latest combined run in one command and skip both SFT training steps, run:
+
+```bash
+REUSE_LAST_RUN=1 bash scripts/run_sft_contrastive_5epoch_all_prune_50.sh charent/ChatLM-mini-Chinese
+```
+
+The shell launchers default to `PRECISION=fp16`; set `PRECISION=bf16` or `PRECISION=fp32` only when you want to override that.
 
 For Chinese command responses, the launcher uses whitespace-insensitive exact match by default (`IGNORE_SPACES=1`) so tokenizer-inserted spaces do not count as wrong actions. Set `IGNORE_SPACES=0` if you need strict string equality.
 

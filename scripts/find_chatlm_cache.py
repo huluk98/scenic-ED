@@ -64,7 +64,7 @@ def main() -> None:
     print("export TRANSFORMERS_OFFLINE=1")
     print(
         "torchrun --standalone --nproc_per_node=8 scripts/scenic_train_chatlm_sft.py "
-        f"--mode regular --model '{best}' --local-files-only --epochs 3 --bf16 --batch-size 16"
+        f"--mode regular --model '{best}' --local-files-only --epochs 5 --fp16 --batch-size 16"
     )
 
 

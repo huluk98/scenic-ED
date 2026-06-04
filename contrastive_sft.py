@@ -38,7 +38,7 @@ OUTPUT_DIR = str(PROJECT_ROOT / "models" / "chatlm_scenic_triplet_sft")
 # Example:
 # OUTPUT_DIR = "/nvme1/home/luke/Encoder-Chinese-SLM/sft_contrastive"
 
-EPOCHS = 3
+EPOCHS = 5
 BATCH_SIZE = 8
 GRADIENT_ACCUMULATION_STEPS = 1
 LEARNING_RATE = 5e-5
@@ -52,8 +52,8 @@ MAX_EXAMPLES = None
 CACHE_DIR = None
 LOCAL_FILES_ONLY = True
 DEVICE = "auto"
-FP16 = False
-BF16 = True
+FP16 = True
+BF16 = False
 NUM_WORKERS = 4
 LOG_EVERY = 20
 SAVE_EVERY_STEPS = 0
@@ -96,8 +96,18 @@ def parse_args() -> argparse.Namespace:
         help="Load model/tokenizer only from local files.",
     )
     parser.add_argument("--device", default=DEVICE, help="auto, cpu, cuda, cuda:0, or mps.")
-    parser.add_argument("--fp16", action="store_true", default=FP16, help="Use CUDA fp16 autocast.")
-    parser.add_argument("--bf16", action="store_true", default=BF16, help="Use CUDA bf16 autocast.")
+    parser.add_argument(
+        "--fp16",
+        action=argparse.BooleanOptionalAction,
+        default=FP16,
+        help="Use CUDA fp16 autocast. Defaults on.",
+    )
+    parser.add_argument(
+        "--bf16",
+        action=argparse.BooleanOptionalAction,
+        default=BF16,
+        help="Use CUDA bf16 autocast. Overrides fp16 when enabled.",
+    )
     parser.add_argument("--num-workers", type=int, default=NUM_WORKERS)
     parser.add_argument("--log-every", type=int, default=LOG_EVERY)
     parser.add_argument("--save-every-steps", type=int, default=SAVE_EVERY_STEPS)
@@ -156,7 +166,7 @@ def contrastive_config_from_args(args: argparse.Namespace) -> ContrastiveSFTConf
         max_examples=args.max_examples,
         cache_dir=Path(args.cache_dir).expanduser() if args.cache_dir else None,
         local_files_only=args.local_files_only,
-        fp16=args.fp16,
+        fp16=args.fp16 and not args.bf16,
         bf16=args.bf16,
         device=args.device,
         num_workers=args.num_workers,
@@ -181,6 +191,7 @@ def print_run_config(args: argparse.Namespace) -> None:
     print(f"  epochs: {args.epochs}")
     print(f"  batch_size_per_gpu: {args.batch_size}")
     print(f"  gradient_accumulation_steps: {args.gradient_accumulation_steps}")
+    print(f"  fp16: {args.fp16 and not args.bf16}")
     print(f"  bf16: {args.bf16}")
     print(f"  local_files_only: {args.local_files_only}")
     print(f"  expected_gpus: {args.expected_gpus}")

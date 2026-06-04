@@ -85,6 +85,17 @@ class VariableLengthTargetTokenizer:
         }
 
 
+def prune_args(**overrides):
+    values = {
+        "sparsity": 0.5,
+        "sparsity_basis": "targeted-linear",
+        "prune_scope": "all-linear",
+        "full_model_correction": True,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 def test_normalize_text_can_ignore_spaces() -> None:
     assert normalize_text(" 好 的 ", ignore_spaces=False) == "好 的"
     assert normalize_text(" 好 的 ", ignore_spaces=True) == "好的"
@@ -141,13 +152,31 @@ def test_magnitude_prune_sets_half_of_linear_weights_to_zero() -> None:
         model[0].weight.copy_(torch.arange(1, 9, dtype=torch.float32).reshape(1, 8))
 
     before = summarize_model(model, "tiny")
-    summary = magnitude_prune(model, sparsity=0.5)
+    summary = magnitude_prune(model, prune_args())
     after = summarize_model(model, "tiny")
 
     assert before["linear_sparsity"] == 0.0
     assert summary["pruned_linear_layers"] == 1
     assert after["linear_zero_weight_count"] == 4
     assert after["linear_sparsity"] == 0.5
+
+
+def test_magnitude_prune_sets_half_of_each_linear_layer_to_zero() -> None:
+    model = torch.nn.Sequential(
+        torch.nn.Linear(8, 1, bias=False),
+        torch.nn.Linear(2, 1, bias=False),
+    )
+    with torch.no_grad():
+        model[0].weight.copy_(torch.arange(1, 9, dtype=torch.float32).reshape(1, 8))
+        model[1].weight.copy_(torch.tensor([[100.0, 101.0]]))
+
+    summary = magnitude_prune(model, prune_args())
+
+    assert summary["pruning_granularity"] == "per-linear-layer"
+    assert int(model[0].weight.eq(0).sum().item()) == 4
+    assert int(model[1].weight.eq(0).sum().item()) == 1
+    assert summary["per_layer_sparsity_min"] == 0.5
+    assert summary["per_layer_sparsity_max"] == 0.5
 
 
 def test_wanda_prune_sets_half_of_linear_weights_to_zero() -> None:
@@ -159,7 +188,7 @@ def test_wanda_prune_sets_half_of_linear_weights_to_zero() -> None:
         max_target_len=4,
         calibration_batch_size=2,
         calibration_batches=1,
-        sparsity=0.5,
+        **vars(prune_args()),
     )
     state = DistributedState(enabled=False, rank=0, local_rank=0, world_size=1, device=torch.device("cpu"))
 

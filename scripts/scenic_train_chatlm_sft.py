@@ -22,8 +22,25 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODEL_NAME_OR_PATH = "charent/ChatLM-mini-Chinese"
 REGULAR_TRAIN_JSON = PROJECT_ROOT / "data" / "SCENIC_full_training_dataset.json"
 CONTRASTIVE_TRAIN_JSON = PROJECT_ROOT / "data" / "SCENIC_full_anchor_positive_negative.json"
-REGULAR_OUTPUT_DIR = PROJECT_ROOT / "models" / "chatlm_scenic_regular_sft"
+REGULAR_OUTPUT_DIR = PROJECT_ROOT / "sft5"
 CONTRASTIVE_OUTPUT_DIR = PROJECT_ROOT / "models" / "chatlm_scenic_triplet_sft"
+
+REGULAR_EPOCHS = 5
+REGULAR_MAX_SOURCE_LENGTH = 256
+REGULAR_MAX_TARGET_LENGTH = 128
+REGULAR_LOG_EVERY = 50
+REGULAR_SAVE_EVERY_STEPS = 500
+REGULAR_SAVE_TOTAL_LIMIT = 2
+REGULAR_FP16 = True
+REGULAR_NUM_WORKERS = 4
+
+CONTRASTIVE_EPOCHS = 5
+CONTRASTIVE_MAX_SOURCE_LENGTH = 128
+CONTRASTIVE_MAX_TARGET_LENGTH = 96
+CONTRASTIVE_LOG_EVERY = 20
+CONTRASTIVE_SAVE_EVERY_STEPS = 0
+CONTRASTIVE_FP16 = True
+CONTRASTIVE_NUM_WORKERS = 0
 
 PROMPT_FIELDS = ("prompt", "instruction", "question", "input", "anchor", "x")
 RESPONSE_FIELDS = ("response", "output", "answer", "completion", "target", "y")
@@ -69,26 +86,27 @@ class RegularSFTConfig:
     model_name_or_path: str = MODEL_NAME_OR_PATH
     train_json: Path = REGULAR_TRAIN_JSON
     output_dir: Path = REGULAR_OUTPUT_DIR
-    epochs: int = 3
+    epochs: int = REGULAR_EPOCHS
     batch_size: int = 4
     gradient_accumulation_steps: int = 4
     learning_rate: float = 5e-5
     weight_decay: float = 0.01
     warmup_ratio: float = 0.03
-    max_source_length: int = 128
-    max_target_length: int = 96
+    max_source_length: int = REGULAR_MAX_SOURCE_LENGTH
+    max_target_length: int = REGULAR_MAX_TARGET_LENGTH
     max_grad_norm: float = 1.0
     seed: int = 42
     max_examples: int | None = None
     cache_dir: Path | None = None
     local_files_only: bool = False
-    fp16: bool = False
+    fp16: bool = REGULAR_FP16
     bf16: bool = False
     device: str = "auto"
-    num_workers: int = 0
-    log_every: int = 20
-    save_every_steps: int = 0
-    save_epoch_checkpoints: bool = True
+    num_workers: int = REGULAR_NUM_WORKERS
+    log_every: int = REGULAR_LOG_EVERY
+    save_every_steps: int = REGULAR_SAVE_EVERY_STEPS
+    save_total_limit: int = REGULAR_SAVE_TOTAL_LIMIT
+    save_epoch_checkpoints: bool = False
     final_save_on_cpu: bool = True
     safe_serialization: bool = True
 
@@ -97,6 +115,15 @@ class RegularSFTConfig:
 class ContrastiveSFTConfig(RegularSFTConfig):
     train_json: Path = CONTRASTIVE_TRAIN_JSON
     output_dir: Path = CONTRASTIVE_OUTPUT_DIR
+    epochs: int = CONTRASTIVE_EPOCHS
+    max_source_length: int = CONTRASTIVE_MAX_SOURCE_LENGTH
+    max_target_length: int = CONTRASTIVE_MAX_TARGET_LENGTH
+    fp16: bool = CONTRASTIVE_FP16
+    bf16: bool = False
+    num_workers: int = CONTRASTIVE_NUM_WORKERS
+    log_every: int = CONTRASTIVE_LOG_EVERY
+    save_every_steps: int = CONTRASTIVE_SAVE_EVERY_STEPS
+    save_epoch_checkpoints: bool = True
     alignment_weight: float = 0.1
     margin: float = 0.5
     negative_field: str = "negative"
@@ -1028,94 +1055,127 @@ def wrap_for_distributed(model: Any, state: DistributedState, mode: str) -> Any:
     )
 
 
+def tokenize_regular_examples_like_original(
+    examples: list[dict[str, str]],
+    tokenizer: Any,
+    config: RegularSFTConfig,
+) -> list[dict[str, Any]]:
+    encoded_examples: list[dict[str, Any]] = []
+    for example in examples:
+        inputs = tokenizer(
+            example["prompt"],
+            max_length=config.max_source_length,
+            truncation=True,
+            padding="max_length",
+        )
+
+        try:
+            labels = tokenizer(
+                text_target=example["response"],
+                max_length=config.max_target_length,
+                truncation=True,
+                padding="max_length",
+            )
+        except TypeError:
+            with tokenizer.as_target_tokenizer():
+                labels = tokenizer(
+                    example["response"],
+                    max_length=config.max_target_length,
+                    truncation=True,
+                    padding="max_length",
+                )
+
+        inputs["labels"] = labels["input_ids"]
+        inputs.pop("token_type_ids", None)
+        encoded_examples.append(inputs)
+    return encoded_examples
+
+
+def make_seq2seq_training_args(config: RegularSFTConfig) -> Any:
+    from transformers import Seq2SeqTrainingArguments
+
+    fp16 = config.fp16 and not config.bf16
+    kwargs: dict[str, Any] = {
+        "output_dir": str(config.output_dir),
+        "per_device_train_batch_size": config.batch_size,
+        "gradient_accumulation_steps": config.gradient_accumulation_steps,
+        "learning_rate": config.learning_rate,
+        "num_train_epochs": config.epochs,
+        "logging_steps": config.log_every,
+        "save_total_limit": config.save_total_limit,
+        "fp16": fp16,
+        "bf16": config.bf16,
+        "dataloader_num_workers": config.num_workers,
+        "ddp_find_unused_parameters": False,
+        "report_to": "none",
+        "weight_decay": config.weight_decay,
+        "warmup_ratio": config.warmup_ratio,
+        "max_grad_norm": config.max_grad_norm,
+        "seed": config.seed,
+        "save_safetensors": config.safe_serialization,
+    }
+    if config.save_every_steps <= 0:
+        kwargs["save_strategy"] = "no"
+    else:
+        kwargs["save_steps"] = config.save_every_steps
+    return Seq2SeqTrainingArguments(**kwargs)
+
+
+def make_seq2seq_trainer(model: Any, training_args: Any, dataset: Any, tokenizer: Any) -> Any:
+    from transformers import DataCollatorForSeq2Seq, Seq2SeqTrainer
+
+    kwargs = {
+        "model": model,
+        "args": training_args,
+        "train_dataset": dataset,
+        "data_collator": DataCollatorForSeq2Seq(tokenizer, model=model),
+    }
+    try:
+        return Seq2SeqTrainer(**kwargs, tokenizer=tokenizer)
+    except TypeError as exc:
+        if "tokenizer" not in str(exc):
+            raise
+        return Seq2SeqTrainer(**kwargs, processing_class=tokenizer)
+
+
 def train_regular_sft(config: RegularSFTConfig | None = None) -> Path:
-    import torch
-    from tqdm.auto import tqdm
+    from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
     config = config or RegularSFTConfig()
-    state = setup_distributed()
+    if config.local_files_only:
+        force_huggingface_offline()
     seed_everything(config.seed)
+
     examples = load_regular_examples(config.train_json)
     if config.max_examples is not None:
         examples = examples[: config.max_examples]
-    rank0_print(state, f"Loaded {len(examples)} regular SFT examples from {config.train_json}.")
-    tokenizer, model, device = load_chatlm_stack(config, state)
-    model = wrap_for_distributed(model, state, mode="regular")
-    dataloader, sampler = make_dataloader(
-        examples,
-        batch_size=config.batch_size,
-        shuffle=True,
-        collate_fn=make_regular_collate(tokenizer, config),
-        num_workers=config.num_workers,
-        state=state,
-    )
-    optimizer, scheduler = make_optimizer_and_scheduler(model, config, len(dataloader))
-    scaler = torch.cuda.amp.GradScaler(enabled=config.fp16 and device.type == "cuda" and not config.bf16)
-    rank0_print(
-        state,
-        "Starting regular SFT: "
-        f"{config.epochs} epoch(s), {len(dataloader)} batch(es)/epoch/process, "
-        f"world_size={state.world_size}, per_gpu_batch={config.batch_size}.",
-    )
+    if int(os.environ.get("RANK", "0")) == 0:
+        print(f"Loaded {len(examples)} regular SFT examples from {config.train_json}.", flush=True)
 
-    global_step = 0
-    model.train()
-    optimizer.zero_grad(set_to_none=True)
-    for epoch in range(1, config.epochs + 1):
-        if sampler is not None:
-            sampler.set_epoch(epoch)
-        progress = tqdm(dataloader, desc=f"regular sft epoch {epoch}/{config.epochs}", disable=not state.is_main)
-        running_loss = 0.0
-        for batch_index, batch in enumerate(progress, start=1):
-            batch = move_batch_to_device(batch, device)
-            with autocast_context(config, device):
-                loss = model(**batch).loss
-                scaled_loss = loss / config.gradient_accumulation_steps
+    load_kwargs: dict[str, Any] = {
+        "trust_remote_code": True,
+        "local_files_only": config.local_files_only,
+    }
+    if config.cache_dir is not None:
+        load_kwargs["cache_dir"] = str(config.cache_dir.expanduser())
 
-            scaler.scale(scaled_loss).backward()
-            running_loss += float(loss.detach().cpu())
+    tokenizer = AutoTokenizer.from_pretrained(config.model_name_or_path, use_fast=False, **load_kwargs)
+    model = AutoModelForSeq2SeqLM.from_pretrained(config.model_name_or_path, **load_kwargs)
+    if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
+        tokenizer.pad_token = tokenizer.eos_token
+    if hasattr(model.config, "use_cache"):
+        model.config.use_cache = False
 
-            if batch_index % config.gradient_accumulation_steps == 0 or batch_index == len(dataloader):
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
-                scaler.step(optimizer)
-                scaler.update()
-                scheduler.step()
-                optimizer.zero_grad(set_to_none=True)
-                global_step += 1
+    dataset = tokenize_regular_examples_like_original(examples, tokenizer, config)
+    trainer = make_seq2seq_trainer(model, make_seq2seq_training_args(config), dataset, tokenizer)
+    trainer.train()
+    trainer.save_model(str(config.output_dir))
 
-                if config.log_every and global_step % config.log_every == 0:
-                    progress.set_postfix(loss=f"{running_loss / batch_index:.4f}", step=global_step)
-                if config.save_every_steps and global_step % config.save_every_steps == 0:
-                    save_rank0_then_sync(
-                        state,
-                        tokenizer,
-                        model,
-                        config.output_dir / f"checkpoint-step-{global_step}",
-                        f"regular step {global_step} checkpoint",
-                    )
+    if trainer.is_world_process_zero():
+        save_tokenizer_for_auto_load(tokenizer, config.output_dir)
+        repair_checkpoint_for_auto_load(config.output_dir, tokenizer=tokenizer)
+        print(f"SFT complete. Model saved to {config.output_dir}.", flush=True)
 
-        if config.save_epoch_checkpoints:
-            save_rank0_then_sync(
-                state,
-                tokenizer,
-                model,
-                config.output_dir / f"checkpoint-epoch-{epoch}",
-                f"regular epoch {epoch} checkpoint",
-            )
-        else:
-            rank0_print(state, f"Finished regular epoch {epoch}; synchronizing ranks.")
-            sync_distributed(state)
-
-    save_final_rank0_after_training(
-        state,
-        tokenizer,
-        model,
-        config.output_dir,
-        "regular final model",
-        save_on_cpu=config.final_save_on_cpu,
-        safe_serialization=config.safe_serialization,
-    )
     return config.output_dir
 
 
@@ -1270,29 +1330,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default=MODEL_NAME_OR_PATH, help="Hugging Face model id or local model directory.")
     parser.add_argument("--train-json", default=None, help="Training .json or .jsonl path. Defaults depend on --mode.")
     parser.add_argument("--output-dir", default=None, help="Directory for final model and checkpoints.")
-    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--epochs", type=int, default=None, help="Epoch count. Defaults to 5 for both modes.")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=5e-5)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--warmup-ratio", type=float, default=0.03)
-    parser.add_argument("--max-source-length", type=int, default=128)
-    parser.add_argument("--max-target-length", type=int, default=96)
+    parser.add_argument("--max-source-length", type=int, default=None)
+    parser.add_argument("--max-target-length", type=int, default=None)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-examples", type=int, default=None, help="Use only the first N examples for a smoke test.")
     parser.add_argument("--cache-dir", default=None, help="Optional Hugging Face cache directory.")
     parser.add_argument("--local-files-only", action="store_true", help="Load model/tokenizer only from local files.")
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda, cuda:0, or mps.")
-    parser.add_argument("--fp16", action="store_true", help="Use CUDA fp16 autocast.")
+    parser.add_argument(
+        "--fp16",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use CUDA fp16. Regular and contrastive SFT default on.",
+    )
     parser.add_argument("--bf16", action="store_true", help="Use CUDA bf16 autocast.")
-    parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--log-every", type=int, default=20)
-    parser.add_argument("--save-every-steps", type=int, default=0)
+    parser.add_argument("--num-workers", type=int, default=None)
+    parser.add_argument("--log-every", type=int, default=None)
+    parser.add_argument("--save-every-steps", type=int, default=None)
     parser.add_argument(
         "--epoch-checkpoints",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
         help="Save checkpoint-epoch-N directories. Use --no-epoch-checkpoints to save only the final model.",
     )
     parser.add_argument(
@@ -1330,6 +1395,18 @@ def configure_runtime(args: argparse.Namespace) -> None:
     os.environ.setdefault("NCCL_ASYNC_ERROR_HANDLING", "1")
 
 
+def defaulted(value: Any, fallback: Any) -> Any:
+    return fallback if value is None else value
+
+
+def fp16_default(args: argparse.Namespace, fallback: bool) -> bool:
+    if args.bf16:
+        return False
+    if args.fp16 is not None:
+        return args.fp16
+    return fallback
+
+
 def regular_config_from_args(args: argparse.Namespace) -> RegularSFTConfig:
     train_json = Path(args.train_json).expanduser() if args.train_json else REGULAR_TRAIN_JSON
     output_dir = Path(args.output_dir).expanduser() if args.output_dir else REGULAR_OUTPUT_DIR
@@ -1337,26 +1414,26 @@ def regular_config_from_args(args: argparse.Namespace) -> RegularSFTConfig:
         model_name_or_path=args.model,
         train_json=train_json,
         output_dir=output_dir,
-        epochs=args.epochs,
+        epochs=defaulted(args.epochs, REGULAR_EPOCHS),
         batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         warmup_ratio=args.warmup_ratio,
-        max_source_length=args.max_source_length,
-        max_target_length=args.max_target_length,
+        max_source_length=defaulted(args.max_source_length, REGULAR_MAX_SOURCE_LENGTH),
+        max_target_length=defaulted(args.max_target_length, REGULAR_MAX_TARGET_LENGTH),
         max_grad_norm=args.max_grad_norm,
         seed=args.seed,
         max_examples=args.max_examples,
         cache_dir=Path(args.cache_dir).expanduser() if args.cache_dir else None,
         local_files_only=args.local_files_only,
-        fp16=args.fp16,
+        fp16=fp16_default(args, REGULAR_FP16),
         bf16=args.bf16,
         device=args.device,
-        num_workers=args.num_workers,
-        log_every=args.log_every,
-        save_every_steps=args.save_every_steps,
-        save_epoch_checkpoints=args.epoch_checkpoints,
+        num_workers=defaulted(args.num_workers, REGULAR_NUM_WORKERS),
+        log_every=defaulted(args.log_every, REGULAR_LOG_EVERY),
+        save_every_steps=defaulted(args.save_every_steps, REGULAR_SAVE_EVERY_STEPS),
+        save_epoch_checkpoints=defaulted(args.epoch_checkpoints, False),
         final_save_on_cpu=args.final_save_on_cpu,
         safe_serialization=args.safe_serialization,
     )
@@ -1369,26 +1446,26 @@ def contrastive_config_from_args(args: argparse.Namespace) -> ContrastiveSFTConf
         model_name_or_path=args.model,
         train_json=train_json,
         output_dir=output_dir,
-        epochs=args.epochs,
+        epochs=defaulted(args.epochs, CONTRASTIVE_EPOCHS),
         batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         warmup_ratio=args.warmup_ratio,
-        max_source_length=args.max_source_length,
-        max_target_length=args.max_target_length,
+        max_source_length=defaulted(args.max_source_length, CONTRASTIVE_MAX_SOURCE_LENGTH),
+        max_target_length=defaulted(args.max_target_length, CONTRASTIVE_MAX_TARGET_LENGTH),
         max_grad_norm=args.max_grad_norm,
         seed=args.seed,
         max_examples=args.max_examples,
         cache_dir=Path(args.cache_dir).expanduser() if args.cache_dir else None,
         local_files_only=args.local_files_only,
-        fp16=args.fp16,
+        fp16=fp16_default(args, CONTRASTIVE_FP16),
         bf16=args.bf16,
         device=args.device,
-        num_workers=args.num_workers,
-        log_every=args.log_every,
-        save_every_steps=args.save_every_steps,
-        save_epoch_checkpoints=args.epoch_checkpoints,
+        num_workers=defaulted(args.num_workers, CONTRASTIVE_NUM_WORKERS),
+        log_every=defaulted(args.log_every, CONTRASTIVE_LOG_EVERY),
+        save_every_steps=defaulted(args.save_every_steps, CONTRASTIVE_SAVE_EVERY_STEPS),
+        save_epoch_checkpoints=defaulted(args.epoch_checkpoints, True),
         final_save_on_cpu=args.final_save_on_cpu,
         safe_serialization=args.safe_serialization,
         alignment_weight=args.alignment_weight,

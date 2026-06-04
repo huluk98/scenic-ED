@@ -18,9 +18,11 @@ Useful env overrides:
   LOCAL_BASE_MODEL_DIR=prune_eval_outputs/my_run/base_model
   LOCAL_FILES_ONLY=1        # force local/offline base model loading
   LOCAL_FILES_ONLY=0        # allow Hugging Face base model loading
+  PRECISION=fp16            # default training precision; set bf16 or fp32 if needed
+  REUSE_LAST_RUN=1          # reuse the latest contrastive run directory and skip SFT training
   IGNORE_SPACES=1           # default for Chinese EM; set 0 for strict whitespace-sensitive EM
-  PRUNE_SCOPE=all-linear      # default for true full-model 50% sparsity
-  SPARSITY_BASIS=full-model   # default: make the whole checkpoint 50% sparse
+  PRUNE_SCOPE=all-linear        # default: prune all eligible linear layers
+  SPARSITY_BASIS=targeted-linear # default: each selected linear layer is pruned to 50%
   SKIP_SPARSITY_CHECK=1     # optional: skip final sparsity verification
   SKIP_TRAIN=1              # reuse CONTRASTIVE_OUTPUT_DIR and only prune/eval
 USAGE
@@ -54,11 +56,45 @@ BENCHMARK_JSON="${BENCHMARK_JSON:-generated/iot_instruction_benchmark_200.json}"
 CALIBRATION_JSON="${CALIBRATION_JSON:-$EVAL_TRAIN_JSON}"
 PRUNE_METHODS="${PRUNE_METHODS:-magnitude wanda gradient nvidia24}"
 PRUNE_SCOPE="${PRUNE_SCOPE:-all-linear}"
-SPARSITY_BASIS="${SPARSITY_BASIS:-full-model}"
-RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
+SPARSITY_BASIS="${SPARSITY_BASIS:-targeted-linear}"
 SAFE_BASE="$(basename "$BASE_MODEL" | tr -c 'A-Za-z0-9_.-' '_')"
 SAFE_BASE="${SAFE_BASE%_}"
 SAFE_BASE="${SAFE_BASE:-chatlm}"
+LATEST_RUN_FILE="${LATEST_RUN_FILE:-prune_eval_outputs/.latest_contrastive5_all50}"
+
+is_truthy() {
+  case "${1:-0}" in
+    1|true|TRUE|yes|YES)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+if [[ -z "${OUTPUT_ROOT:-}" ]] && is_truthy "${REUSE_LAST_RUN:-0}"; then
+  if [[ -f "$LATEST_RUN_FILE" ]]; then
+    IFS= read -r OUTPUT_ROOT < "$LATEST_RUN_FILE" || true
+    if [[ -n "${OUTPUT_ROOT:-}" && ! -d "$OUTPUT_ROOT" ]]; then
+      OUTPUT_ROOT=""
+    fi
+  fi
+  if [[ -z "${OUTPUT_ROOT:-}" ]]; then
+    OUTPUT_ROOT="$(find prune_eval_outputs -maxdepth 1 -type d -name "${SAFE_BASE}_contrastive5_all50_*" 2>/dev/null | sort | tail -n 1 || true)"
+  fi
+  if [[ -z "${OUTPUT_ROOT:-}" ]]; then
+    echo "REUSE_LAST_RUN=1 but no previous contrastive run was found for base '$BASE_MODEL'." >&2
+    echo "Run once without REUSE_LAST_RUN, or set OUTPUT_ROOT to the run directory to reuse." >&2
+    exit 2
+  fi
+fi
+
+if is_truthy "${REUSE_LAST_RUN:-0}"; then
+  SKIP_TRAIN="${SKIP_TRAIN:-1}"
+fi
+
+RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-prune_eval_outputs/${SAFE_BASE}_contrastive5_all50_${RUN_ID}}"
 LOCAL_BASE_MODEL_DIR="${LOCAL_BASE_MODEL_DIR:-${OUTPUT_ROOT}/base_model}"
 CONTRASTIVE_OUTPUT_DIR="${CONTRASTIVE_OUTPUT_DIR:-${OUTPUT_ROOT}/contrastive_sft_5epoch}"
@@ -135,11 +171,18 @@ esac
 
 TRAIN_MODEL="$BASE_MODEL"
 if [[ ! -d "$BASE_MODEL" && "$USE_LOCAL_FILES_ONLY" -eq 0 ]]; then
-  mkdir -p "$LOCAL_BASE_MODEL_DIR"
-  echo "Downloading base model '$BASE_MODEL' into: $LOCAL_BASE_MODEL_DIR"
-  download_hf_model "$BASE_MODEL" "$LOCAL_BASE_MODEL_DIR"
-  TRAIN_MODEL="$LOCAL_BASE_MODEL_DIR"
-  USE_LOCAL_FILES_ONLY=1
+  if is_truthy "${SKIP_TRAIN:-0}" && [[ -d "$LOCAL_BASE_MODEL_DIR" ]]; then
+    TRAIN_MODEL="$LOCAL_BASE_MODEL_DIR"
+    USE_LOCAL_FILES_ONLY=1
+  elif is_truthy "${SKIP_TRAIN:-0}"; then
+    echo "Skipping base model download because SFT training is being reused."
+  else
+    mkdir -p "$LOCAL_BASE_MODEL_DIR"
+    echo "Downloading base model '$BASE_MODEL' into: $LOCAL_BASE_MODEL_DIR"
+    download_hf_model "$BASE_MODEL" "$LOCAL_BASE_MODEL_DIR"
+    TRAIN_MODEL="$LOCAL_BASE_MODEL_DIR"
+    USE_LOCAL_FILES_ONLY=1
+  fi
 fi
 
 TRAIN_LOCAL_ARGS=()
@@ -155,7 +198,26 @@ else
   TRAIN_LOCAL_ARGS+=(--no-local-files-only)
 fi
 
+PRECISION="${PRECISION:-fp16}"
+case "$PRECISION" in
+  fp16|FP16)
+    PRECISION_ARGS=(--fp16)
+    ;;
+  bf16|BF16)
+    PRECISION_ARGS=(--bf16)
+    ;;
+  fp32|FP32|none|NONE)
+    PRECISION_ARGS=(--no-fp16)
+    ;;
+  *)
+    echo "PRECISION must be fp16, bf16, or fp32." >&2
+    exit 2
+    ;;
+esac
+
 mkdir -p "$OUTPUT_ROOT"
+mkdir -p "$(dirname "$LATEST_RUN_FILE")"
+printf '%s\n' "$OUTPUT_ROOT" > "$LATEST_RUN_FILE"
 
 EVAL_EXTRA_ARGS=(
   --train-json "$EVAL_TRAIN_JSON"
@@ -182,6 +244,7 @@ echo "Final all-method JSON: $FINAL_JSON"
 echo "Sparsity check JSON: $SPARSITY_CHECK_JSON"
 echo "NPROC_PER_NODE: $NPROC_PER_NODE"
 echo "LOCAL_FILES_ONLY for base model: $USE_LOCAL_FILES_ONLY"
+echo "Training precision: $PRECISION"
 echo "Contrastive train data: $CONTRASTIVE_TRAIN_JSON"
 echo "Eval train data: $EVAL_TRAIN_JSON"
 echo "Benchmark data: $BENCHMARK_JSON"
@@ -211,6 +274,7 @@ TRAIN_ARGS=(
   --no-epoch-checkpoints
   --final-save-on-cpu
   --safe-serialization
+  "${PRECISION_ARGS[@]}"
   "${TRAIN_LOCAL_ARGS[@]}"
 )
 

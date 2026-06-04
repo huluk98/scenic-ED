@@ -17,9 +17,11 @@ Useful env overrides:
   LOCAL_BASE_MODEL_DIR=prune_eval_outputs/my_run/base_model
   LOCAL_FILES_ONLY=1       # force local/offline base model loading
   LOCAL_FILES_ONLY=0       # allow Hugging Face base model loading
+  PRECISION=fp16           # default training precision; set bf16 or fp32 if needed
+  REUSE_LAST_RUN=1         # reuse the latest combined run directory and skip SFT training
   IGNORE_SPACES=1          # default for Chinese EM; set 0 for strict whitespace-sensitive EM
-  PRUNE_SCOPE=all-linear     # default for true full-model 50% sparsity
-  SPARSITY_BASIS=full-model  # default: make the whole checkpoint 50% sparse
+  PRUNE_SCOPE=all-linear        # default: prune all eligible linear layers
+  SPARSITY_BASIS=targeted-linear # default: each selected linear layer is pruned to 50%
   SKIP_SPARSITY_CHECK=1    # optional: skip final sparsity verification
   SKIP_TRAIN=1             # reuse both SFT checkpoints and only prune/eval
   SKIP_REGULAR_TRAIN=1     # reuse regular SFT checkpoint
@@ -56,11 +58,45 @@ BENCHMARK_JSON="${BENCHMARK_JSON:-generated/iot_instruction_benchmark_200.json}"
 CALIBRATION_JSON="${CALIBRATION_JSON:-$EVAL_TRAIN_JSON}"
 PRUNE_METHODS="${PRUNE_METHODS:-magnitude wanda gradient nvidia24}"
 PRUNE_SCOPE="${PRUNE_SCOPE:-all-linear}"
-SPARSITY_BASIS="${SPARSITY_BASIS:-full-model}"
-RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
+SPARSITY_BASIS="${SPARSITY_BASIS:-targeted-linear}"
 SAFE_BASE="$(basename "$BASE_MODEL" | tr -c 'A-Za-z0-9_.-' '_')"
 SAFE_BASE="${SAFE_BASE%_}"
 SAFE_BASE="${SAFE_BASE:-chatlm}"
+LATEST_RUN_FILE="${LATEST_RUN_FILE:-prune_eval_outputs/.latest_sft_contrastive5_all50}"
+
+is_truthy() {
+  case "${1:-0}" in
+    1|true|TRUE|yes|YES)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+if [[ -z "${OUTPUT_ROOT:-}" ]] && is_truthy "${REUSE_LAST_RUN:-0}"; then
+  if [[ -f "$LATEST_RUN_FILE" ]]; then
+    IFS= read -r OUTPUT_ROOT < "$LATEST_RUN_FILE" || true
+    if [[ -n "${OUTPUT_ROOT:-}" && ! -d "$OUTPUT_ROOT" ]]; then
+      OUTPUT_ROOT=""
+    fi
+  fi
+  if [[ -z "${OUTPUT_ROOT:-}" ]]; then
+    OUTPUT_ROOT="$(find prune_eval_outputs -maxdepth 1 -type d -name "${SAFE_BASE}_sft_contrastive5_all50_*" 2>/dev/null | sort | tail -n 1 || true)"
+  fi
+  if [[ -z "${OUTPUT_ROOT:-}" ]]; then
+    echo "REUSE_LAST_RUN=1 but no previous combined run was found for base '$BASE_MODEL'." >&2
+    echo "Run once without REUSE_LAST_RUN, or set OUTPUT_ROOT to the run directory to reuse." >&2
+    exit 2
+  fi
+fi
+
+if is_truthy "${REUSE_LAST_RUN:-0}"; then
+  SKIP_TRAIN="${SKIP_TRAIN:-1}"
+fi
+
+RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-prune_eval_outputs/${SAFE_BASE}_sft_contrastive5_all50_${RUN_ID}}"
 LOCAL_BASE_MODEL_DIR="${LOCAL_BASE_MODEL_DIR:-${OUTPUT_ROOT}/base_model}"
 REGULAR_OUTPUT_DIR="${REGULAR_OUTPUT_DIR:-${OUTPUT_ROOT}/regular_sft_5epoch}"
@@ -74,8 +110,10 @@ TRAIN_GRADIENT_ACCUMULATION_STEPS="${TRAIN_GRADIENT_ACCUMULATION_STEPS:-1}"
 TRAIN_LEARNING_RATE="${TRAIN_LEARNING_RATE:-5e-5}"
 TRAIN_WEIGHT_DECAY="${TRAIN_WEIGHT_DECAY:-0.01}"
 TRAIN_WARMUP_RATIO="${TRAIN_WARMUP_RATIO:-0.03}"
-TRAIN_MAX_SOURCE_LENGTH="${TRAIN_MAX_SOURCE_LENGTH:-128}"
-TRAIN_MAX_TARGET_LENGTH="${TRAIN_MAX_TARGET_LENGTH:-96}"
+REGULAR_TRAIN_MAX_SOURCE_LENGTH="${REGULAR_TRAIN_MAX_SOURCE_LENGTH:-${TRAIN_MAX_SOURCE_LENGTH:-256}}"
+REGULAR_TRAIN_MAX_TARGET_LENGTH="${REGULAR_TRAIN_MAX_TARGET_LENGTH:-${TRAIN_MAX_TARGET_LENGTH:-128}}"
+CONTRASTIVE_TRAIN_MAX_SOURCE_LENGTH="${CONTRASTIVE_TRAIN_MAX_SOURCE_LENGTH:-${TRAIN_MAX_SOURCE_LENGTH:-128}}"
+CONTRASTIVE_TRAIN_MAX_TARGET_LENGTH="${CONTRASTIVE_TRAIN_MAX_TARGET_LENGTH:-${TRAIN_MAX_TARGET_LENGTH:-96}}"
 TRAIN_NUM_WORKERS="${TRAIN_NUM_WORKERS:-4}"
 TRAIN_ALIGNMENT_WEIGHT="${TRAIN_ALIGNMENT_WEIGHT:-0.1}"
 TRAIN_MARGIN="${TRAIN_MARGIN:-0.5}"
@@ -138,11 +176,18 @@ esac
 
 TRAIN_MODEL="$BASE_MODEL"
 if [[ ! -d "$BASE_MODEL" && "$USE_LOCAL_FILES_ONLY" -eq 0 ]]; then
-  mkdir -p "$LOCAL_BASE_MODEL_DIR"
-  echo "Downloading base model '$BASE_MODEL' into: $LOCAL_BASE_MODEL_DIR"
-  download_hf_model "$BASE_MODEL" "$LOCAL_BASE_MODEL_DIR"
-  TRAIN_MODEL="$LOCAL_BASE_MODEL_DIR"
-  USE_LOCAL_FILES_ONLY=1
+  if is_truthy "${SKIP_TRAIN:-0}" && [[ -d "$LOCAL_BASE_MODEL_DIR" ]]; then
+    TRAIN_MODEL="$LOCAL_BASE_MODEL_DIR"
+    USE_LOCAL_FILES_ONLY=1
+  elif is_truthy "${SKIP_TRAIN:-0}"; then
+    echo "Skipping base model download because SFT training is being reused."
+  else
+    mkdir -p "$LOCAL_BASE_MODEL_DIR"
+    echo "Downloading base model '$BASE_MODEL' into: $LOCAL_BASE_MODEL_DIR"
+    download_hf_model "$BASE_MODEL" "$LOCAL_BASE_MODEL_DIR"
+    TRAIN_MODEL="$LOCAL_BASE_MODEL_DIR"
+    USE_LOCAL_FILES_ONLY=1
+  fi
 fi
 
 TRAIN_LOCAL_ARGS=()
@@ -158,7 +203,22 @@ else
   TRAIN_LOCAL_ARGS+=(--no-local-files-only)
 fi
 
-PRECISION_ARGS=(--bf16)
+PRECISION="${PRECISION:-fp16}"
+case "$PRECISION" in
+  fp16|FP16)
+    PRECISION_ARGS=(--fp16)
+    ;;
+  bf16|BF16)
+    PRECISION_ARGS=(--bf16)
+    ;;
+  fp32|FP32|none|NONE)
+    PRECISION_ARGS=(--no-fp16)
+    ;;
+  *)
+    echo "PRECISION must be fp16, bf16, or fp32." >&2
+    exit 2
+    ;;
+esac
 
 EVAL_EXTRA_ARGS=(
   --train-json "$EVAL_TRAIN_JSON"
@@ -179,6 +239,8 @@ case "$IGNORE_SPACES" in
 esac
 
 mkdir -p "$OUTPUT_ROOT"
+mkdir -p "$(dirname "$LATEST_RUN_FILE")"
+printf '%s\n' "$OUTPUT_ROOT" > "$LATEST_RUN_FILE"
 
 echo "Base model: $BASE_MODEL"
 echo "Training model path: $TRAIN_MODEL"
@@ -188,8 +250,11 @@ echo "Final all-model JSON: $FINAL_JSON"
 echo "Sparsity check JSON: $SPARSITY_CHECK_JSON"
 echo "NPROC_PER_NODE: $NPROC_PER_NODE"
 echo "LOCAL_FILES_ONLY for base model: $USE_LOCAL_FILES_ONLY"
+echo "Training precision: $PRECISION"
 echo "Regular train data: $REGULAR_TRAIN_JSON"
 echo "Contrastive train data: $CONTRASTIVE_TRAIN_JSON"
+echo "Regular train max lengths: source=$REGULAR_TRAIN_MAX_SOURCE_LENGTH target=$REGULAR_TRAIN_MAX_TARGET_LENGTH"
+echo "Contrastive train max lengths: source=$CONTRASTIVE_TRAIN_MAX_SOURCE_LENGTH target=$CONTRASTIVE_TRAIN_MAX_TARGET_LENGTH"
 echo "Eval train data: $EVAL_TRAIN_JSON"
 echo "Benchmark data: $BENCHMARK_JSON"
 echo "Ignore whitespace in Chinese exact-match eval: $IGNORE_SPACES"
@@ -208,8 +273,8 @@ REGULAR_TRAIN_ARGS=(
   --learning-rate "$TRAIN_LEARNING_RATE"
   --weight-decay "$TRAIN_WEIGHT_DECAY"
   --warmup-ratio "$TRAIN_WARMUP_RATIO"
-  --max-source-length "$TRAIN_MAX_SOURCE_LENGTH"
-  --max-target-length "$TRAIN_MAX_TARGET_LENGTH"
+  --max-source-length "$REGULAR_TRAIN_MAX_SOURCE_LENGTH"
+  --max-target-length "$REGULAR_TRAIN_MAX_TARGET_LENGTH"
   --num-workers "$TRAIN_NUM_WORKERS"
   --ddp-timeout-minutes "$DDP_TIMEOUT_MINUTES"
   --no-epoch-checkpoints
@@ -230,8 +295,8 @@ CONTRASTIVE_TRAIN_ARGS=(
   --learning-rate "$TRAIN_LEARNING_RATE"
   --weight-decay "$TRAIN_WEIGHT_DECAY"
   --warmup-ratio "$TRAIN_WARMUP_RATIO"
-  --max-source-length "$TRAIN_MAX_SOURCE_LENGTH"
-  --max-target-length "$TRAIN_MAX_TARGET_LENGTH"
+  --max-source-length "$CONTRASTIVE_TRAIN_MAX_SOURCE_LENGTH"
+  --max-target-length "$CONTRASTIVE_TRAIN_MAX_TARGET_LENGTH"
   --num-workers "$TRAIN_NUM_WORKERS"
   --alignment-weight "$TRAIN_ALIGNMENT_WEIGHT"
   --margin "$TRAIN_MARGIN"

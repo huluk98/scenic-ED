@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--default-sparsity-basis",
         choices=("full-model", "targeted-linear"),
-        default="full-model",
+        default="targeted-linear",
         help="Sparsity basis to use when a report does not record sparsity_basis.",
     )
     return parser.parse_args()
@@ -318,6 +318,7 @@ def inspect_model_dir(entry: ModelEntry, expected_sparsity: float, tolerance: fl
 
     overall = {"params": 0, "zeros": 0}
     scopes = {scope: empty_scope_counts() for scope in PRUNE_SCOPES}
+    scope_layers: dict[str, list[dict[str, Any]]] = {scope: [] for scope in PRUNE_SCOPES}
 
     try:
         for weight_file in weight_files:
@@ -337,6 +338,17 @@ def inspect_model_dir(entry: ModelEntry, expected_sparsity: float, tolerance: fl
                 for scope in PRUNE_SCOPES:
                     if linear_module_in_scope(module_name, scope):
                         add_counts(scopes[scope], total, zeros, layer=True)
+                        sparsity = zeros / total if total else 0.0
+                        scope_layers[scope].append(
+                            {
+                                "name": module_name,
+                                "parameter_count": total,
+                                "zero_parameter_count": zeros,
+                                "active_parameter_count": total - zeros,
+                                "sparsity": sparsity,
+                                "matches_expected": abs(sparsity - expected_sparsity) <= tolerance,
+                            }
+                        )
     except Exception as exc:
         result["status"] = "inspection_failed"
         result["error"] = str(exc)
@@ -346,15 +358,25 @@ def inspect_model_dir(entry: ModelEntry, expected_sparsity: float, tolerance: fl
     scope_results: dict[str, Any] = {}
     for scope, counts in scopes.items():
         sparsity = counts["zeros"] / counts["params"] if counts["params"] else 0.0
+        layers = scope_layers[scope]
+        matching_layers = [layer for layer in layers if layer["matches_expected"]]
+        layer_sparsities = [layer["sparsity"] for layer in layers]
         scope_results[scope] = {
             **with_active_count(counts),
             "sparsity": sparsity,
             "matches_expected": abs(sparsity - expected_sparsity) <= tolerance if counts["params"] else False,
+            "layers": layers,
+            "layers_matching_expected": len(matching_layers),
+            "layers_not_matching_expected": len(layers) - len(matching_layers),
+            "all_layers_match_expected": bool(layers) and len(matching_layers) == len(layers),
+            "layer_sparsity_min": min(layer_sparsities) if layer_sparsities else 0.0,
+            "layer_sparsity_max": max(layer_sparsities) if layer_sparsities else 0.0,
         }
 
     expected_scope_result = scope_results.get(entry.expected_scope, {})
     full_model_matches = abs(overall_sparsity - expected_sparsity) <= tolerance
     expected_scope_matches = bool(expected_scope_result.get("matches_expected"))
+    expected_scope_layers_match = bool(expected_scope_result.get("all_layers_match_expected"))
     expected_basis_matches = full_model_matches if entry.expected_basis == "full-model" else expected_scope_matches
     result.update(
         {
@@ -368,6 +390,7 @@ def inspect_model_dir(entry: ModelEntry, expected_sparsity: float, tolerance: fl
             "expected_scope_result": expected_scope_result,
             "full_model_is_50_percent_sparse": full_model_matches,
             "expected_scope_is_50_percent_sparse": expected_scope_matches,
+            "expected_scope_layers_are_50_percent_sparse": expected_scope_layers_match,
             "expected_basis_is_50_percent_sparse": expected_basis_matches,
         }
     )
@@ -378,7 +401,7 @@ def inspect_active_parameters(
     model_path: str | Path,
     *,
     expected_scope: str = "all-linear",
-    expected_basis: str = "full-model",
+    expected_basis: str = "targeted-linear",
     expected_sparsity: float = 0.5,
     tolerance: float = 0.01,
     label: str = "model",
@@ -404,7 +427,7 @@ def print_table(results: list[dict[str, Any]]) -> None:
     header = (
         f"{'label':18s} {'method':12s} {'status':18s} {'overall':>9s} "
         f"{'active':>14s} {'basis':12s} {'scope':15s} {'scope_sp':>9s} "
-        f"{'scope_act':>14s} {'basis50':>8s} {'full50':>7s} {'scope50':>8s}"
+        f"{'scope_act':>14s} {'basis50':>8s} {'full50':>7s} {'scope50':>8s} {'layers50':>8s}"
     )
     print(header)
     print("-" * len(header))
@@ -424,7 +447,8 @@ def print_table(results: list[dict[str, Any]]) -> None:
             f"{result['expected_scope_result'].get('active', 0):14d} "
             f"{str(result['expected_basis_is_50_percent_sparse']):>8s} "
             f"{str(result['full_model_is_50_percent_sparse']):>7s} "
-            f"{str(result['expected_scope_is_50_percent_sparse']):>8s}"
+            f"{str(result['expected_scope_is_50_percent_sparse']):>8s} "
+            f"{str(result['expected_scope_layers_are_50_percent_sparse']):>8s}"
         )
 
 
@@ -438,6 +462,7 @@ def build_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
     full_50 = [result for result in ok_results if result.get("full_model_is_50_percent_sparse")]
     scope_50 = [result for result in ok_results if result.get("expected_scope_is_50_percent_sparse")]
     basis_50 = [result for result in ok_results if result.get("expected_basis_is_50_percent_sparse")]
+    layer_50 = [result for result in ok_results if result.get("expected_scope_layers_are_50_percent_sparse")]
     return {
         "total_entries": len(results),
         "ok_entries": len(ok_results),
@@ -445,9 +470,13 @@ def build_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
         "full_model_50_percent_sparse_count": len(full_50),
         "expected_scope_50_percent_sparse_count": len(scope_50),
         "expected_basis_50_percent_sparse_count": len(basis_50),
+        "expected_scope_layers_50_percent_sparse_count": len(layer_50),
         "all_existing_models_full_50_percent_sparse": bool(ok_results) and len(full_50) == len(ok_results),
         "all_existing_models_expected_scope_50_percent_sparse": bool(ok_results) and len(scope_50) == len(ok_results),
         "all_existing_models_expected_basis_50_percent_sparse": bool(ok_results) and len(basis_50) == len(ok_results),
+        "all_existing_models_expected_scope_layers_50_percent_sparse": (
+            bool(ok_results) and len(layer_50) == len(ok_results)
+        ),
     }
 
 
@@ -512,6 +541,7 @@ def main() -> None:
         f"ok={summary['ok_entries']}/{summary['total_entries']} "
         f"basis50={summary['expected_basis_50_percent_sparse_count']} "
         f"scope50={summary['expected_scope_50_percent_sparse_count']} "
+        f"layers50={summary['expected_scope_layers_50_percent_sparse_count']} "
         f"full50={summary['full_model_50_percent_sparse_count']}"
     )
 
@@ -542,6 +572,11 @@ def main() -> None:
         if not summary["all_existing_models_expected_basis_50_percent_sparse"]:
             raise SystemExit(
                 "Sparsity check failed: at least one model did not match the expected sparsity basis."
+            )
+        if not summary["all_existing_models_expected_scope_layers_50_percent_sparse"]:
+            raise SystemExit(
+                "Sparsity check failed: at least one expected-scope linear layer did not match "
+                f"{args.expected_sparsity:.4f} within tolerance {args.tolerance}."
             )
 
 
