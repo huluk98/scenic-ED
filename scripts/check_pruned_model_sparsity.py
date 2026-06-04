@@ -248,11 +248,25 @@ def linear_module_in_scope(name: str, scope: str) -> bool:
     raise ValueError(f"Unknown scope: {scope}")
 
 
+def is_lm_head_weight(module_name: str) -> bool:
+    normalized = module_name.lower().replace("-", "_")
+    dotted = normalized.replace("_", ".")
+    return (
+        normalized == "lm_head"
+        or normalized.endswith(".lm_head")
+        or dotted == "lm.head"
+        or dotted.endswith(".lm.head")
+    )
+
+
 def looks_like_linear_weight(name: str, ndim: int) -> bool:
     if not name.endswith(".weight") or ndim != 2:
         return False
 
     module_name = name[: -len(".weight")]
+    if is_lm_head_weight(module_name):
+        return False
+
     normalized = module_name.lower().replace("_", ".")
     parts = set(normalized.split("."))
     non_linear_tokens = {

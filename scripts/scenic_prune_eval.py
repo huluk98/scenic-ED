@@ -119,6 +119,12 @@ def parse_args() -> argparse.Namespace:
         help="Linear module scope to prune. Defaults to all-linear.",
     )
     parser.add_argument(
+        "--prune-lm-head",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Also prune lm_head weights. Defaults to false so the final vocabulary projection stays dense.",
+    )
+    parser.add_argument(
         "--full-model-correction",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -355,7 +361,21 @@ def load_model_and_tokenizer(args: argparse.Namespace, model_path: str, state: D
     return tokenizer, model
 
 
-def linear_module_in_scope(name: str, prune_scope: str) -> bool:
+def is_lm_head_module(name: str) -> bool:
+    normalized = name.lower().replace("-", "_")
+    dotted = normalized.replace("_", ".")
+    return (
+        normalized == "lm_head"
+        or normalized.endswith(".lm_head")
+        or dotted == "lm.head"
+        or dotted.endswith(".lm.head")
+    )
+
+
+def linear_module_in_scope(name: str, prune_scope: str, prune_lm_head: bool = False) -> bool:
+    if not prune_lm_head and is_lm_head_module(name):
+        return False
+
     if prune_scope == "all-linear":
         return True
 
@@ -371,19 +391,24 @@ def linear_module_in_scope(name: str, prune_scope: str) -> bool:
     raise ValueError(f"Unknown prune scope: {prune_scope}")
 
 
-def iter_linear_modules(model: nn.Module, prune_scope: str = "all-linear") -> list[tuple[str, nn.Linear]]:
+def iter_linear_modules(
+    model: nn.Module,
+    prune_scope: str = "all-linear",
+    prune_lm_head: bool = False,
+) -> list[tuple[str, nn.Linear]]:
     return [
         (name, module)
         for name, module in model.named_modules()
-        if isinstance(module, nn.Linear) and linear_module_in_scope(name, prune_scope)
+        if isinstance(module, nn.Linear)
+        and linear_module_in_scope(name, prune_scope, prune_lm_head=prune_lm_head)
     ]
 
 
-def summarize_linear_scope(model: nn.Module, prune_scope: str) -> dict[str, Any]:
+def summarize_linear_scope(model: nn.Module, prune_scope: str, prune_lm_head: bool = False) -> dict[str, Any]:
     linear_total = 0
     linear_zero = 0
     linear_layers = 0
-    for _, module in iter_linear_modules(model, prune_scope=prune_scope):
+    for _, module in iter_linear_modules(model, prune_scope=prune_scope, prune_lm_head=prune_lm_head):
         linear_layers += 1
         weight = module.weight.detach()
         linear_total += weight.numel()
@@ -679,13 +704,15 @@ def finalize_pruning_summary(
     summary: dict[str, Any],
 ) -> dict[str, Any]:
     model_after = summarize_parameter_sparsity(model)
+    prune_lm_head = bool(getattr(args, "prune_lm_head", False))
     target_zero_count = int(round(args.sparsity * model_after["parameter_count"]))
     reported_target_zero_count = summary.get("full_model_target_zero_count")
     if reported_target_zero_count is None:
         reported_target_zero_count = target_zero_count
     return {
         **summary,
-        **summarize_linear_scope(model, args.prune_scope),
+        **summarize_linear_scope(model, args.prune_scope, prune_lm_head=prune_lm_head),
+        "prune_lm_head": prune_lm_head,
         "full_model_sparsity_after": model_after["parameter_sparsity"],
         "full_model_zero_count_after": model_after["zero_parameter_count"],
         "full_model_active_parameter_count_after": model_after["active_parameter_count"],
@@ -914,7 +941,11 @@ def apply_full_model_magnitude_correction(
 
 
 def magnitude_prune(model: nn.Module, args: argparse.Namespace) -> dict[str, Any]:
-    linear_modules = iter_linear_modules(model, prune_scope=args.prune_scope)
+    linear_modules = iter_linear_modules(
+        model,
+        prune_scope=args.prune_scope,
+        prune_lm_head=bool(getattr(args, "prune_lm_head", False)),
+    )
     effective_sparsity, basis_summary = resolve_effective_weight_sparsity(
         model,
         args,
@@ -934,7 +965,11 @@ def magnitude_prune(model: nn.Module, args: argparse.Namespace) -> dict[str, Any
 
 
 def nvidia_2_4_prune(model: nn.Module, args: argparse.Namespace) -> dict[str, Any]:
-    linear_modules = iter_linear_modules(model, prune_scope=args.prune_scope)
+    linear_modules = iter_linear_modules(
+        model,
+        prune_scope=args.prune_scope,
+        prune_lm_head=bool(getattr(args, "prune_lm_head", False)),
+    )
     pruned_layers = 0
     skipped_layers = 0
     protected_parameter_ids: set[int] = set()
@@ -999,7 +1034,11 @@ def gradient_prune(
     state: DistributedState,
 ) -> dict[str, Any]:
     model.train()
-    linear_modules = iter_linear_modules(model, prune_scope=args.prune_scope)
+    linear_modules = iter_linear_modules(
+        model,
+        prune_scope=args.prune_scope,
+        prune_lm_head=bool(getattr(args, "prune_lm_head", False)),
+    )
     effective_sparsity, basis_summary = resolve_effective_weight_sparsity(
         model,
         args,
@@ -1048,7 +1087,11 @@ def wanda_prune(
     state: DistributedState,
 ) -> dict[str, Any]:
     activation_stats: dict[nn.Linear, dict[str, Any]] = {}
-    linear_modules = iter_linear_modules(model, prune_scope=args.prune_scope)
+    linear_modules = iter_linear_modules(
+        model,
+        prune_scope=args.prune_scope,
+        prune_lm_head=bool(getattr(args, "prune_lm_head", False)),
+    )
     module_names = {module: name for name, module in linear_modules}
     skipped_non_tensor: set[nn.Linear] = set()
     skipped_shape_mismatch: set[nn.Linear] = set()
@@ -1215,6 +1258,7 @@ def make_plan_report(
             "target_sparsity": args.sparsity,
             "sparsity_basis": args.sparsity_basis,
             "prune_scope": args.prune_scope,
+            "prune_lm_head": args.prune_lm_head,
             "full_model_correction": args.full_model_correction,
         },
         "datasets": {name: {"total": len(records)} for name, records in datasets.items()},

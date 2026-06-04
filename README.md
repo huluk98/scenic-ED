@@ -229,7 +229,7 @@ bash scripts/run_prune_eval_50.sh models/chatlm_scenic_triplet_sft \
 
 `scripts/scenic_prune_eval.py` supports `magnitude`, `gradient`, `wanda`, and NVIDIA `2:4` pruning. The report stores `accuracy` as exact-match@1 so you can verify the checkpoint you passed in before comparing the pruned model.
 
-By default, the prune/eval launchers now use `SPARSITY_BASIS=targeted-linear` and `PRUNE_SCOPE=all-linear`, so `SPARSITY=0.5` targets 50% sparsity in each selected linear layer. For an encoder-only reference run, set `PRUNE_SCOPE=encoder-linear`.
+By default, the prune/eval launchers now use `SPARSITY_BASIS=targeted-linear` and `PRUNE_SCOPE=all-linear`, so `SPARSITY=0.5` targets 50% sparsity in each selected encoder/decoder linear layer while leaving `lm_head` dense. This protects the final vocabulary projection from pruning. For an encoder-only reference run, set `PRUNE_SCOPE=encoder-linear`; to intentionally include the output head, set `PRUNE_LM_HEAD=1` or pass `--prune-lm-head`.
 
 For unstructured `magnitude`, `gradient`, and `wanda`, pruning is per selected linear layer, so each pruned layer lands near the requested sparsity instead of borrowing zeros from another layer. NVIDIA `2:4` remains structured by definition, so eligible linear weights are pruned with the 2-of-4 pattern; the final sparsity check reports any layer that does not reach the expected 50%.
 
@@ -241,7 +241,7 @@ python scripts/check_pruned_model_sparsity.py \
   --output-json prune_eval_outputs/<run>/sparsity_check.json
 ```
 
-For the default per-layer runs, `expected_scope_is_50_percent_sparse` and `expected_scope_layers_are_50_percent_sparse` should both be true. `full_model_is_50_percent_sparse` may be false because embeddings, biases, and other non-linear parameters are intentionally left dense.
+For the default per-layer runs, `expected_scope_is_50_percent_sparse` and `expected_scope_layers_are_50_percent_sparse` should both be true. `full_model_is_50_percent_sparse` may be false because `lm_head`, embeddings, biases, and other non-linear parameters are intentionally left dense.
 
 To inspect active/nonzero parameters for one model path directly:
 

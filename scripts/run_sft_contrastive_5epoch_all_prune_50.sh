@@ -20,8 +20,9 @@ Useful env overrides:
   PRECISION=fp16           # default training precision; set bf16 or fp32 if needed
   REUSE_LAST_RUN=1         # reuse the latest combined run directory and skip SFT training
   IGNORE_SPACES=1          # default for Chinese EM; set 0 for strict whitespace-sensitive EM
-  PRUNE_SCOPE=all-linear        # default: prune all eligible linear layers
+  PRUNE_SCOPE=all-linear        # default: prune eligible encoder/decoder linear layers
   SPARSITY_BASIS=targeted-linear # default: each selected linear layer is pruned to 50%
+  PRUNE_LM_HEAD=1          # optional: include final lm_head projection in pruning
   SKIP_SPARSITY_CHECK=1    # optional: skip final sparsity verification
   SKIP_TRAIN=1             # reuse both SFT checkpoints and only prune/eval
   SKIP_REGULAR_TRAIN=1     # reuse regular SFT checkpoint

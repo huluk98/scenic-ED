@@ -17,6 +17,7 @@ SPARSITY="${SPARSITY:-0.5}"
 IGNORE_SPACES="${IGNORE_SPACES:-0}"
 PRUNE_SCOPE="${PRUNE_SCOPE:-all-linear}"
 SPARSITY_BASIS="${SPARSITY_BASIS:-targeted-linear}"
+PRUNE_LM_HEAD="${PRUNE_LM_HEAD:-0}"
 SAFE_MODEL_NAME="$(basename "$MODEL_PATH" | tr -c 'A-Za-z0-9_.-' '_')"
 SAFE_MODEL_NAME="${SAFE_MODEL_NAME%_}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-prune_eval_outputs}"
@@ -44,6 +45,7 @@ echo "Prune method: $METHOD"
 echo "Prune sparsity: $SPARSITY"
 echo "Prune scope: $PRUNE_SCOPE"
 echo "Sparsity basis: $SPARSITY_BASIS"
+echo "Prune lm_head: $PRUNE_LM_HEAD"
 
 USER_SET_PRUNED_DIR=0
 USER_SET_REPORT_JSON=0
@@ -66,6 +68,18 @@ COMMON_ARGS=(
   --sparsity-basis "$SPARSITY_BASIS"
   --prune-scope "$PRUNE_SCOPE"
 )
+
+case "$PRUNE_LM_HEAD" in
+  1|true|TRUE|yes|YES)
+    COMMON_ARGS+=(--prune-lm-head)
+    ;;
+  0|false|FALSE|no|NO)
+    ;;
+  *)
+    echo "PRUNE_LM_HEAD must be 1 or 0." >&2
+    exit 2
+    ;;
+esac
 
 case "$IGNORE_SPACES" in
   1|true|TRUE|yes|YES)

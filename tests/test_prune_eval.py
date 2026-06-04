@@ -14,11 +14,13 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from aggregate_prune_eval_reports import build_aggregate_report, discover_method_reports
+from check_pruned_model_sparsity import looks_like_linear_weight
 from scenic_prune_eval import (
     CalibrationDataset,
     DistributedState,
     compact_metrics,
     finalize_eval_result,
+    iter_linear_modules,
     magnitude_prune,
     normalize_text,
     summarize_model,
@@ -90,6 +92,7 @@ def prune_args(**overrides):
         "sparsity": 0.5,
         "sparsity_basis": "targeted-linear",
         "prune_scope": "all-linear",
+        "prune_lm_head": False,
         "full_model_correction": True,
     }
     values.update(overrides)
@@ -177,6 +180,51 @@ def test_magnitude_prune_sets_half_of_each_linear_layer_to_zero() -> None:
     assert int(model[1].weight.eq(0).sum().item()) == 1
     assert summary["per_layer_sparsity_min"] == 0.5
     assert summary["per_layer_sparsity_max"] == 0.5
+
+
+def test_lm_head_is_excluded_from_default_linear_pruning_scope() -> None:
+    class TinyEncoderDecoder(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.encoder = torch.nn.ModuleDict({"proj": torch.nn.Linear(4, 4, bias=False)})
+            self.decoder = torch.nn.ModuleDict({"proj": torch.nn.Linear(4, 4, bias=False)})
+            self.lm_head = torch.nn.Linear(4, 8, bias=False)
+
+    model = TinyEncoderDecoder()
+
+    default_names = [name for name, _ in iter_linear_modules(model, prune_scope="all-linear")]
+    including_head_names = [
+        name for name, _ in iter_linear_modules(model, prune_scope="all-linear", prune_lm_head=True)
+    ]
+
+    assert default_names == ["encoder.proj", "decoder.proj"]
+    assert including_head_names == ["encoder.proj", "decoder.proj", "lm_head"]
+
+
+def test_magnitude_prune_leaves_lm_head_dense_by_default() -> None:
+    class TinyEncoderDecoder(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.encoder = torch.nn.ModuleDict({"proj": torch.nn.Linear(8, 1, bias=False)})
+            self.lm_head = torch.nn.Linear(8, 1, bias=False)
+
+    model = TinyEncoderDecoder()
+    with torch.no_grad():
+        model.encoder["proj"].weight.copy_(torch.arange(1, 9, dtype=torch.float32).reshape(1, 8))
+        model.lm_head.weight.copy_(torch.arange(1, 9, dtype=torch.float32).reshape(1, 8))
+
+    summary = magnitude_prune(model, prune_args())
+
+    assert summary["prune_lm_head"] is False
+    assert summary["pruned_linear_layers"] == 1
+    assert int(model.encoder["proj"].weight.eq(0).sum().item()) == 4
+    assert int(model.lm_head.weight.eq(0).sum().item()) == 0
+
+
+def test_sparsity_checker_does_not_count_lm_head_as_target_linear() -> None:
+    assert looks_like_linear_weight("encoder.block.0.layer.0.DenseReluDense.wi.weight", 2)
+    assert not looks_like_linear_weight("lm_head.weight", 2)
+    assert not looks_like_linear_weight("model.lm_head.weight", 2)
 
 
 def test_wanda_prune_sets_half_of_linear_weights_to_zero() -> None:
