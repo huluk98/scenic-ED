@@ -22,7 +22,7 @@ Main outputs:
 
 Common environment overrides:
   OUTPUT_ROOT=onnx_eval_outputs/my_run
-  SOURCE_ASSET_DIR=/path/to/original/base_model
+  SOURCE_ASSET_DIR=/path/to/original/base_model-or-hf-id
   LOCAL_FILES_ONLY=1
   SKIP_TRAIN=1
   FORCE_TRAIN=1
@@ -349,7 +349,7 @@ run_finetune() {
 
 repair_checkpoint_assets() {
   local checkpoint_dir="$1"
-  local source_dir="$2"
+  local source_ref="$2"
   local label="$3"
 
   if [[ ! -d "$checkpoint_dir" ]]; then
@@ -362,16 +362,24 @@ repair_checkpoint_assets() {
     scripts/repair_checkpoint_tokenizer.py
     --checkpoint "$checkpoint_dir"
   )
-  if [[ -d "$source_dir" ]]; then
-    repair_cmd+=(--source-tokenizer "$source_dir")
-    echo "Repairing ${label} tokenizer/custom-code assets from source: ${source_dir}"
+  if [[ -n "$source_ref" ]]; then
+    repair_cmd+=(--source-tokenizer "$source_ref")
+  fi
+  if truthy "$LOCAL_FILES_ONLY"; then
+    repair_cmd+=(--local-files-only)
+  fi
+
+  if [[ -d "$source_ref" ]]; then
+    echo "Repairing ${label} tokenizer/custom-code assets from local source: ${source_ref}"
+  elif [[ -n "$source_ref" ]]; then
+    echo "Repairing ${label} tokenizer/custom-code assets from Hugging Face/cache source: ${source_ref}"
   else
     echo "Repairing ${label} tokenizer/custom-code assets using checkpoint metadata."
-    echo "If custom modeling files are still missing, rerun with SOURCE_ASSET_DIR=/path/to/original/base_model."
+    echo "If custom modeling files are still missing, rerun with SOURCE_ASSET_DIR=/path/to/original/base_model-or-hf-id."
   fi
   "${repair_cmd[@]}"
 
-  if [[ -f "${source_dir}/modeling_chat_model.py" && ! -f "${checkpoint_dir}/modeling_chat_model.py" ]]; then
+  if [[ -d "$source_ref" && -f "${source_ref}/modeling_chat_model.py" && ! -f "${checkpoint_dir}/modeling_chat_model.py" ]]; then
     echo "Expected modeling_chat_model.py to be copied into ${checkpoint_dir}, but it is still missing." >&2
     exit 1
   fi

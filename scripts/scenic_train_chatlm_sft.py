@@ -373,9 +373,12 @@ def model_for_save(model: Any) -> Any:
 
 
 def json_safe_value(value: Any) -> Any:
-    import torch
+    try:
+        import torch
+    except ModuleNotFoundError:
+        torch = None
 
-    if isinstance(value, torch.dtype):
+    if torch is not None and isinstance(value, torch.dtype):
         return str(value).replace("torch.", "")
     if isinstance(value, dict):
         return {key: json_safe_value(item) for key, item in value.items()}
