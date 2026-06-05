@@ -12,7 +12,7 @@ Only --base_model is required. All other paths default to repo-local values:
   --output_dir        runs/h20_encoder_decoder_trt24_<UTC timestamp>
 
 Optional overrides:
-  --gpus              default: 0,1,2,3,4,5,6,7
+  --gpus              default: keep CUDA_VISIBLE_DEVICES, else auto-detect
   --epochs            default: 5
   --source_seq_len    default: 64
   --target_seq_len    default: 64
@@ -47,7 +47,8 @@ BASE_MODEL="${BASE_MODEL:-}"
 TRAIN_JSONL="${TRAIN_JSONL:-data/SCENIC_full_training_dataset.json}"
 IOT200_JSONL="${IOT200_JSONL:-generated/iot_instruction_benchmark_200.json}"
 OUTPUT_DIR="${OUTPUT_DIR:-runs/h20_encoder_decoder_trt24_${RUN_ID}}"
-GPUS="${GPUS:-0,1,2,3,4,5,6,7}"
+ORIGINAL_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}"
+GPUS="${GPUS:-${ORIGINAL_CUDA_VISIBLE_DEVICES}}"
 EPOCHS="${EPOCHS:-5}"
 SOURCE_SEQ_LEN="${SOURCE_SEQ_LEN:-64}"
 TARGET_SEQ_LEN="${TARGET_SEQ_LEN:-64}"
@@ -74,6 +75,20 @@ SKIP_PRUNE_EVAL="${SKIP_PRUNE_EVAL:-0}"
 SKIP_ONNX="${SKIP_ONNX:-0}"
 SKIP_TRT="${SKIP_TRT:-0}"
 SKIP_LATENCY="${SKIP_LATENCY:-0}"
+
+detect_gpu_mask() {
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    local count
+    if ! count="$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')"; then
+      count="0"
+    fi
+    if [[ "${count}" =~ ^[0-9]+$ && "${count}" -gt 0 ]]; then
+      seq -s, 0 $((count - 1))
+      return
+    fi
+  fi
+  echo "0"
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -195,9 +210,17 @@ if [[ -z "$BASE_MODEL" ]]; then
   exit 2
 fi
 
-export CUDA_VISIBLE_DEVICES="$GPUS"
-IFS=',' read -r -a GPU_ARRAY <<< "$GPUS"
+if [[ -z "$GPUS" ]]; then
+  GPUS="$(detect_gpu_mask)"
+fi
+if [[ -n "$GPUS" ]]; then
+  export CUDA_VISIBLE_DEVICES="$GPUS"
+  IFS=',' read -r -a GPU_ARRAY <<< "$GPUS"
+else
+  GPU_ARRAY=(0)
+fi
 NPROC_PER_NODE="${NPROC_PER_NODE:-${#GPU_ARRAY[@]}}"
+export NPROC_PER_NODE
 
 ENV_DIR="${OUTPUT_DIR}/env"
 CHECKPOINT_DIR="${OUTPUT_DIR}/checkpoints"
@@ -355,6 +378,11 @@ def import_version(module: str) -> str | None:
 
 report: dict[str, Any] = {
     "created_at": datetime.now(timezone.utc).isoformat(),
+    "environment": {
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "nvidia_visible_devices": os.environ.get("NVIDIA_VISIBLE_DEVICES"),
+        "nproc_per_node": os.environ.get("NPROC_PER_NODE"),
+    },
     "python": {
         "executable": sys.executable,
         "version": sys.version,
@@ -415,6 +443,9 @@ except Exception as exc:
 lines: list[str] = []
 lines.append(f"created_at: {report['created_at']}")
 lines.append(f"python: {report['python']['version'].splitlines()[0]}")
+lines.append(f"CUDA_VISIBLE_DEVICES: {report['environment'].get('cuda_visible_devices')}")
+lines.append(f"NVIDIA_VISIBLE_DEVICES: {report['environment'].get('nvidia_visible_devices')}")
+lines.append(f"NPROC_PER_NODE: {report['environment'].get('nproc_per_node')}")
 lines.append("")
 for name, key in (("nvidia-smi", "nvidia_smi"), ("nvcc --version", "nvcc"), ("trtexec --version", "trtexec")):
     command_report = report["commands"][key]
