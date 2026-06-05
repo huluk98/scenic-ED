@@ -29,6 +29,14 @@ python -m pip install -r requirements.txt
 
 `requirements.txt` installs the CUDA 12.8 PyTorch wheel on Linux, which is the right match for NVIDIA H20 machines with driver `570.124.06`.
 
+For the H20 ONNX/TensorRT deployment launcher, install the additional Python-side deployment packages and TensorRT bindings with one copy-paste line:
+
+```bash
+python -m pip install --extra-index-url https://pypi.nvidia.com "numpy>=1.26" "onnx>=1.16" "onnxruntime-gpu>=1.18" "onnxscript>=0.3" "safetensors>=0.4.5" "tensorrt>=10"
+```
+
+The native TensorRT benchmark also needs NVIDIA `trtexec` on `PATH`; check it with `trtexec --version`. If `trtexec` is missing, install TensorRT from NVIDIA packages or use an NVIDIA TensorRT container before running `scripts/run_h20_encoder_decoder_sft_prune_trt24.sh`.
+
 Verify the CUDA wheel after install:
 
 ```bash
