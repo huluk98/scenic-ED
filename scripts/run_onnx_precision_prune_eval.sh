@@ -22,6 +22,7 @@ Main outputs:
 
 Common environment overrides:
   OUTPUT_ROOT=onnx_eval_outputs/my_run
+  SOURCE_ASSET_DIR=/path/to/original/base_model
   LOCAL_FILES_ONLY=1
   SKIP_TRAIN=1
   FORCE_TRAIN=1
@@ -109,6 +110,7 @@ FINETUNE_MODE="${FINETUNE_MODE:-regular}"
 FINETUNE_EPOCHS="${FINETUNE_EPOCHS:-5}"
 FINETUNE_TRAIN_JSON="${FINETUNE_TRAIN_JSON:-data/SCENIC_full_training_dataset.json}"
 FINETUNE_OUTPUT_DIR="${FINETUNE_OUTPUT_DIR:-${CHECKPOINT_ROOT}/sft5}"
+SOURCE_ASSET_DIR="${SOURCE_ASSET_DIR:-$ORIGINAL_MODEL}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-4}"
 TRAIN_GRADIENT_ACCUMULATION_STEPS="${TRAIN_GRADIENT_ACCUMULATION_STEPS:-4}"
 TRAIN_LEARNING_RATE="${TRAIN_LEARNING_RATE:-5e-5}"
@@ -342,6 +344,36 @@ run_finetune() {
     torchrun --standalone --nproc_per_node="$TRAIN_NPROC_PER_NODE" "${train_cmd[@]}"
   else
     "$PYTHON" "${train_cmd[@]}"
+  fi
+}
+
+repair_checkpoint_assets() {
+  local checkpoint_dir="$1"
+  local source_dir="$2"
+  local label="$3"
+
+  if [[ ! -d "$checkpoint_dir" ]]; then
+    echo "Cannot repair ${label}; checkpoint directory is missing: ${checkpoint_dir}" >&2
+    exit 2
+  fi
+
+  local repair_cmd=(
+    "$PYTHON"
+    scripts/repair_checkpoint_tokenizer.py
+    --checkpoint "$checkpoint_dir"
+  )
+  if [[ -d "$source_dir" ]]; then
+    repair_cmd+=(--source-tokenizer "$source_dir")
+    echo "Repairing ${label} tokenizer/custom-code assets from source: ${source_dir}"
+  else
+    echo "Repairing ${label} tokenizer/custom-code assets using checkpoint metadata."
+    echo "If custom modeling files are still missing, rerun with SOURCE_ASSET_DIR=/path/to/original/base_model."
+  fi
+  "${repair_cmd[@]}"
+
+  if [[ -f "${source_dir}/modeling_chat_model.py" && ! -f "${checkpoint_dir}/modeling_chat_model.py" ]]; then
+    echo "Expected modeling_chat_model.py to be copied into ${checkpoint_dir}, but it is still missing." >&2
+    exit 1
   fi
 }
 
@@ -1394,7 +1426,9 @@ echo "Benchmark accuracy data: $BENCHMARK_JSON"
 echo "Deployment benchmark seq lengths: $LATENCY_SEQ_LENGTHS, batch=1"
 
 run_finetune
+repair_checkpoint_assets "$FINETUNED_CHECKPOINT_DIR" "$SOURCE_ASSET_DIR" "fine-tuned checkpoint"
 create_nvidia24_pruned_checkpoint
+repair_checkpoint_assets "$PRUNED_CHECKPOINT_DIR" "$FINETUNED_CHECKPOINT_DIR" "NVIDIA 2:4 pruned checkpoint"
 
 export_onnx "$FINETUNED_CHECKPOINT_DIR" "$FP16_DENSE_ONNX" "fine-tuned dense FP16" "fp16" "$EXPORT_DEVICE"
 export_onnx "$PRUNED_CHECKPOINT_DIR" "$FP16_NVIDIA24_ONNX" "fine-tuned NVIDIA 2:4 FP16" "fp16" "$EXPORT_DEVICE"
