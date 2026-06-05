@@ -62,6 +62,7 @@ Latency:
 TensorRT:
   RUN_TENSORRT=0        # default: do not run TensorRT on non-TensorRT machines
   TENSORRT_REQUIRED=0   # set to 1 when TensorRT must be present
+  TENSORRT_SPARSITY_ENABLE=1 # ask TensorRT to use 2:4 sparse tactics when eligible
   TENSORRT_ENGINE_CACHE_ROOT=<output-root>/tensorrt_engines
 
 INT8:
@@ -158,6 +159,7 @@ FP32_EXPORT_DEVICE="${FP32_EXPORT_DEVICE:-cpu}"
 RUN_INT8="${RUN_INT8:-1}"
 RUN_TENSORRT="${RUN_TENSORRT:-0}"
 TENSORRT_REQUIRED="${TENSORRT_REQUIRED:-0}"
+TENSORRT_SPARSITY_ENABLE="${TENSORRT_SPARSITY_ENABLE:-1}"
 OPTIMUM_DTYPE_MODE="${OPTIMUM_DTYPE_MODE:-auto}"
 FORCE_EXPORT="${FORCE_EXPORT:-0}"
 FORCE_QUANTIZE="${FORCE_QUANTIZE:-0}"
@@ -658,6 +660,7 @@ evaluate_accuracy_variant() {
   TRUST_REMOTE_CODE="$TRUST_REMOTE_CODE" \
   PYTORCH_DEVICE="$PYTORCH_DEVICE" \
   TENSORRT_ENGINE_CACHE_ROOT="$TENSORRT_ENGINE_CACHE_ROOT" \
+  TENSORRT_SPARSITY_ENABLE="$TENSORRT_SPARSITY_ENABLE" \
   "$PYTHON" - "${ACCURACY_EXTRA_ARGS[@]}" <<'PY'
 from __future__ import annotations
 
@@ -812,14 +815,17 @@ if runtime == "pytorch":
 elif runtime in {"onnx", "tensorrt"}:
     provider_options: dict[str, Any] | None = None
     if runtime == "tensorrt":
+        trt_sparse_enabled = env_bool("TENSORRT_SPARSITY_ENABLE", True)
         engine_cache_dir = (
             Path(os.environ["TENSORRT_ENGINE_CACHE_ROOT"])
             / os.environ["VARIANT_LABEL"]
+            / ("sparse" if trt_sparse_enabled else "dense_tactics")
             / "accuracy"
         )
         engine_cache_dir.mkdir(parents=True, exist_ok=True)
         provider_options = {
             "trt_fp16_enable": "1",
+            "trt_sparsity_enable": "1" if trt_sparse_enabled else "0",
             "trt_engine_cache_enable": "1",
             "trt_engine_cache_path": str(engine_cache_dir),
         }
@@ -855,6 +861,7 @@ report = {
     "source_path": str(source_path),
     "tokenizer_path": tokenizer_path,
     "onnx_provider": provider if runtime != "pytorch" else None,
+    "onnx_provider_options": provider_options,
     "model_or_engine_size_bytes": engine_size_bytes or path_size_bytes(source_path),
     "model_or_engine_size_mb": (engine_size_bytes or path_size_bytes(source_path)) / 1_000_000,
     "tensorrt_engine_cache_dir": str(engine_cache_dir) if engine_cache_dir is not None else None,
@@ -906,6 +913,7 @@ benchmark_runtime() {
   FP16_ONNX_PROVIDER="$FP16_ONNX_PROVIDER" \
   RUN_TENSORRT="$RUN_TENSORRT" \
   TENSORRT_ONNX_PROVIDER="$TENSORRT_ONNX_PROVIDER" \
+  TENSORRT_SPARSITY_ENABLE="$TENSORRT_SPARSITY_ENABLE" \
   TENSORRT_ENGINE_CACHE_ROOT="$TENSORRT_ENGINE_CACHE_ROOT" \
   RUNTIME_BENCHMARK_JSON="$RUNTIME_BENCHMARK_JSON" \
   "$PYTHON" <<'PY'
@@ -1081,6 +1089,7 @@ class RuntimeModel:
                 cache_dir.mkdir(parents=True, exist_ok=True)
                 provider_options = {
                     "trt_fp16_enable": "1",
+                    "trt_sparsity_enable": "1" if env_bool("TENSORRT_SPARSITY_ENABLE", True) else "0",
                     "trt_engine_cache_enable": "1",
                     "trt_engine_cache_path": str(cache_dir),
                 }
@@ -1133,6 +1142,8 @@ dense_onnx = Path(os.environ["FP16_DENSE_ONNX"]).expanduser()
 pruned_onnx = Path(os.environ["FP16_NVIDIA24_ONNX"]).expanduser()
 trt_cache_root = Path(os.environ["TENSORRT_ENGINE_CACHE_ROOT"]).expanduser()
 run_tensorrt = env_bool("RUN_TENSORRT", False)
+trt_sparse_enabled = env_bool("TENSORRT_SPARSITY_ENABLE", True)
+trt_cache_suffix = "sparse" if trt_sparse_enabled else "dense_tactics"
 
 variants = [
     {
@@ -1182,7 +1193,7 @@ if run_tensorrt:
                 "source": dense_onnx,
                 "tokenizer_fallback": dense_checkpoint,
                 "provider": os.environ["TENSORRT_ONNX_PROVIDER"],
-                "cache_dir": trt_cache_root / "dense",
+                "cache_dir": trt_cache_root / "dense" / trt_cache_suffix,
             },
             {
                 "model_variant": "nvidia24",
@@ -1191,7 +1202,7 @@ if run_tensorrt:
                 "source": pruned_onnx,
                 "tokenizer_fallback": pruned_checkpoint,
                 "provider": os.environ["TENSORRT_ONNX_PROVIDER"],
-                "cache_dir": trt_cache_root / "nvidia24",
+                "cache_dir": trt_cache_root / "nvidia24" / trt_cache_suffix,
             },
         ]
     )
@@ -1257,6 +1268,7 @@ for spec in variants:
                 "model_size_bytes": source_size,
                 "model_size_mb": source_size / 1_000_000,
                 "tensorrt_engine_cache_dir": str(spec["cache_dir"]) if spec["cache_dir"] is not None else None,
+                "tensorrt_sparsity_enable": trt_sparse_enabled if spec["runtime"] == "tensorrt" else None,
                 "tensorrt_engine_size_bytes": engine_size,
                 "tensorrt_engine_size_mb": engine_size / 1_000_000,
             }
