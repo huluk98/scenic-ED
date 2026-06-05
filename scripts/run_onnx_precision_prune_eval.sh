@@ -12,7 +12,8 @@ End-to-end SCENIC deployment pass:
   3. Export dense and 2:4-pruned checkpoints to ONNX FP16.
   4. Export FP32 ONNX sources and dynamic-quantize them to ONNX INT8.
   5. Run EM@1 / EM@5 on both the 200-example benchmark and training data.
-  6. Benchmark batch=1 deployment latency for PyTorch FP16, ONNX FP16, and TensorRT FP16.
+  6. Benchmark batch=1 deployment latency for PyTorch FP16 and ONNX FP16.
+     TensorRT FP16 is ready behind RUN_TENSORRT=1 when that runtime is available.
 
 Main outputs:
   onnx_eval_outputs/<run>/all_deployment_em_latency_report.json
@@ -58,8 +59,8 @@ Latency:
   LATENCY_MAX_NEW_TOKENS=128
 
 TensorRT:
-  RUN_TENSORRT=1
-  TENSORRT_REQUIRED=1
+  RUN_TENSORRT=0        # default: do not run TensorRT on non-TensorRT machines
+  TENSORRT_REQUIRED=0   # set to 1 when TensorRT must be present
   TENSORRT_ENGINE_CACHE_ROOT=<output-root>/tensorrt_engines
 
 INT8:
@@ -153,8 +154,8 @@ ONNX_TASK="${ONNX_TASK:-text2text-generation-with-past}"
 ONNX_OPSET="${ONNX_OPSET:-17}"
 FP32_EXPORT_DEVICE="${FP32_EXPORT_DEVICE:-cpu}"
 RUN_INT8="${RUN_INT8:-1}"
-RUN_TENSORRT="${RUN_TENSORRT:-1}"
-TENSORRT_REQUIRED="${TENSORRT_REQUIRED:-1}"
+RUN_TENSORRT="${RUN_TENSORRT:-0}"
+TENSORRT_REQUIRED="${TENSORRT_REQUIRED:-0}"
 OPTIMUM_DTYPE_MODE="${OPTIMUM_DTYPE_MODE:-auto}"
 FORCE_EXPORT="${FORCE_EXPORT:-0}"
 FORCE_QUANTIZE="${FORCE_QUANTIZE:-0}"
@@ -1091,7 +1092,7 @@ pruned_checkpoint = Path(os.environ["PRUNED_CHECKPOINT_DIR"]).expanduser()
 dense_onnx = Path(os.environ["FP16_DENSE_ONNX"]).expanduser()
 pruned_onnx = Path(os.environ["FP16_NVIDIA24_ONNX"]).expanduser()
 trt_cache_root = Path(os.environ["TENSORRT_ENGINE_CACHE_ROOT"]).expanduser()
-run_tensorrt = env_bool("RUN_TENSORRT", True)
+run_tensorrt = env_bool("RUN_TENSORRT", False)
 
 variants = [
     {
@@ -1231,7 +1232,7 @@ payload = {
     "created_at": datetime.now(timezone.utc).isoformat(),
     "benchmark_json": os.environ["BENCHMARK_JSON"],
     "metric_contract": {
-        "runtime": "PyTorch FP16, ONNX FP16, TensorRT FP16",
+        "runtime": "PyTorch FP16 and ONNX FP16 by default; optional TensorRT FP16 with RUN_TENSORRT=1",
         "precision": "FP16 deployment benchmark; INT8 artifacts are exported/evaluated separately",
         "latency": "mean latency, ms/query, batch size 1",
         "p95_latency": "95th percentile latency, ms/query",
@@ -1297,7 +1298,7 @@ accuracy_specs = [
     ("onnx_fp16_dense", "ONNX FP16 dense", report_root / "onnx_fp16_dense_accuracy_report.json"),
     ("onnx_fp16_nvidia24", "ONNX FP16 2:4 pruned", report_root / "onnx_fp16_nvidia24_accuracy_report.json"),
 ]
-if env_bool("RUN_TENSORRT", True):
+if env_bool("RUN_TENSORRT", False):
     accuracy_specs.extend(
         [
             ("tensorrt_fp16_dense", "TensorRT FP16 dense", report_root / "tensorrt_fp16_dense_accuracy_report.json"),
@@ -1359,7 +1360,7 @@ payload = {
     "pruning_summary_json": os.environ["PRUNED_SUMMARY_JSON"],
     "output_root": os.environ["OUTPUT_ROOT"],
     "metric_contract": {
-        "runtime": "PyTorch FP16, ONNX FP16, TensorRT FP16",
+        "runtime": "PyTorch FP16 and ONNX FP16 by default; optional TensorRT FP16 with RUN_TENSORRT=1",
         "precision": "FP16 primary deployment comparison; ONNX INT8 exported/evaluated as optional follow-up artifact",
         "latency": "mean latency, ms/query, batch size 1",
         "p95_latency": "95th percentile latency, ms/query",
