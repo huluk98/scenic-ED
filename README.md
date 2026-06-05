@@ -37,6 +37,13 @@ python -m pip install --extra-index-url https://pypi.nvidia.com "numpy>=1.26" "o
 
 The native TensorRT benchmark also needs NVIDIA `trtexec` on `PATH`; check it with `trtexec --version`. If `trtexec` is missing, install TensorRT from NVIDIA packages or use an NVIDIA TensorRT container before running `scripts/run_h20_encoder_decoder_sft_prune_trt24.sh`.
 
+If your base model is a Hugging Face repo id, pass it directly. The H20 launcher downloads that repo into `<output_dir>/base_model` first, then trains from the local snapshot with `trust_remote_code=True`, so the original Hugging Face `modeling.py` and related custom-code files are used and preserved for later pruning/export steps:
+
+```bash
+bash scripts/run_h20_encoder_decoder_sft_prune_trt24.sh \
+  --base_model charent/ChatLM-mini-Chinese
+```
+
 Verify the CUDA wheel after install:
 
 ```bash

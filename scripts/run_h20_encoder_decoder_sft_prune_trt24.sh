@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat >&2 <<'USAGE'
 Usage:
-  bash scripts/run_h20_encoder_decoder_sft_prune_trt24.sh --base_model /PATH/TO/BASE_MODEL
+  bash scripts/run_h20_encoder_decoder_sft_prune_trt24.sh --base_model /PATH/TO/BASE_MODEL_OR_HF_ID
 
 Only --base_model is required. All other paths default to repo-local values:
   --train_jsonl       data/SCENIC_full_training_dataset.json
@@ -22,9 +22,14 @@ Optional overrides:
   --measure_iters     default: 1000
   --warmup_iters      default: 100
 
+Useful env overrides:
+  LOCAL_FILES_ONLY    default: auto; local dirs stay offline, HF ids are downloaded first
+  LOCAL_BASE_MODEL_DIR default: <output_dir>/base_model for downloaded HF snapshots
+  HF_TOKEN            optional token for private Hugging Face models
+
 Example:
   bash scripts/run_h20_encoder_decoder_sft_prune_trt24.sh \
-    --base_model /PATH/TO/BASE_MODEL
+    --base_model charent/ChatLM-mini-Chinese
 USAGE
 }
 
@@ -61,7 +66,7 @@ DDP_TIMEOUT_MINUTES="${DDP_TIMEOUT_MINUTES:-10}"
 IGNORE_SPACES="${IGNORE_SPACES:-1}"
 PRUNE_LM_HEAD="${PRUNE_LM_HEAD:-1}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-1}"
-LOCAL_FILES_ONLY="${LOCAL_FILES_ONLY:-1}"
+LOCAL_FILES_ONLY="${LOCAL_FILES_ONLY:-auto}"
 FORCE_EXPORT="${FORCE_EXPORT:-0}"
 FORCE_TRT="${FORCE_TRT:-0}"
 SKIP_TRAIN="${SKIP_TRAIN:-0}"
@@ -185,13 +190,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$BASE_MODEL" ]]; then
-  echo "Missing required --base_model /PATH/TO/BASE_MODEL." >&2
+  echo "Missing required --base_model /PATH/TO/BASE_MODEL_OR_HF_ID." >&2
   usage
-  exit 2
-fi
-
-if [[ "$LOCAL_FILES_ONLY" == "1" && ! -d "$BASE_MODEL" ]]; then
-  echo "--base_model must be a local directory when LOCAL_FILES_ONLY=1: $BASE_MODEL" >&2
   exit 2
 fi
 
@@ -208,6 +208,11 @@ REPORT_DIR="${OUTPUT_DIR}/reports"
 LOG_DIR="${OUTPUT_DIR}/logs"
 RESULT_DIR="${OUTPUT_DIR}/results"
 HELPER_DIR="${OUTPUT_DIR}/helpers"
+
+BASE_MODEL_SOURCE="$BASE_MODEL"
+LOCAL_BASE_MODEL_DIR="${LOCAL_BASE_MODEL_DIR:-${OUTPUT_DIR}/base_model}"
+TRAIN_MODEL="$BASE_MODEL"
+USE_LOCAL_FILES_ONLY=0
 
 DENSE_CKPT="${CHECKPOINT_DIR}/dense_sft_fp16"
 PRUNED_CKPT="${CHECKPOINT_DIR}/nvidia_2_4_sft_fp16"
@@ -229,6 +234,82 @@ truthy() {
     1|true|TRUE|yes|YES|y|Y|on|ON) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+normalize_base_model_source() {
+  case "$LOCAL_FILES_ONLY" in
+    auto)
+      if [[ -d "$BASE_MODEL" ]]; then
+        USE_LOCAL_FILES_ONLY=1
+        TRAIN_MODEL="$BASE_MODEL"
+      else
+        USE_LOCAL_FILES_ONLY=0
+        TRAIN_MODEL="$LOCAL_BASE_MODEL_DIR"
+      fi
+      ;;
+    1|true|TRUE|yes|YES|y|Y|on|ON)
+      USE_LOCAL_FILES_ONLY=1
+      TRAIN_MODEL="$BASE_MODEL"
+      ;;
+    0|false|FALSE|no|NO|n|N|off|OFF)
+      if [[ -d "$BASE_MODEL" ]]; then
+        USE_LOCAL_FILES_ONLY=1
+        TRAIN_MODEL="$BASE_MODEL"
+      else
+        USE_LOCAL_FILES_ONLY=0
+        TRAIN_MODEL="$LOCAL_BASE_MODEL_DIR"
+      fi
+      ;;
+    *)
+      echo "LOCAL_FILES_ONLY must be auto, 1, or 0." >&2
+      exit 2
+      ;;
+  esac
+}
+
+materialize_hf_base_model() {
+  if [[ "$USE_LOCAL_FILES_ONLY" -eq 1 ]]; then
+    export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+    export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
+    export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}"
+    return
+  fi
+
+  if [[ -d "$TRAIN_MODEL" && -f "${TRAIN_MODEL}/config.json" ]]; then
+    echo "Reusing local Hugging Face base model snapshot: $TRAIN_MODEL"
+  else
+    echo "Downloading Hugging Face base model '${BASE_MODEL_SOURCE}' to: $TRAIN_MODEL"
+    BASE_MODEL_SOURCE="$BASE_MODEL_SOURCE" \
+    LOCAL_BASE_MODEL_DIR="$TRAIN_MODEL" \
+    "$PYTHON" <<'PY'
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from huggingface_hub import snapshot_download
+
+repo_id = os.environ["BASE_MODEL_SOURCE"]
+local_dir = Path(os.environ["LOCAL_BASE_MODEL_DIR"]).expanduser()
+local_dir.mkdir(parents=True, exist_ok=True)
+kwargs = {
+    "repo_id": repo_id,
+    "local_dir": str(local_dir),
+    "token": os.environ.get("HF_TOKEN") or None,
+}
+try:
+    snapshot_download(**kwargs, local_dir_use_symlinks=False)
+except TypeError:
+    snapshot_download(**kwargs)
+print(f"Downloaded {repo_id} to {local_dir}")
+PY
+  fi
+
+  TRAIN_MODEL="$LOCAL_BASE_MODEL_DIR"
+  USE_LOCAL_FILES_ONLY=1
+  export HF_HUB_OFFLINE=1
+  export TRANSFORMERS_OFFLINE=1
+  export HF_DATASETS_OFFLINE=1
 }
 
 write_helpers() {
@@ -1648,7 +1729,7 @@ run_training() {
   TRAIN_ARGS=(
     scripts/scenic_train_chatlm_sft.py
     --mode regular
-    --model "$BASE_MODEL"
+    --model "$TRAIN_MODEL"
     --train-json "$TRAIN_JSONL"
     --output-dir "$DENSE_CKPT"
     --epochs "$EPOCHS"
@@ -1666,7 +1747,7 @@ run_training() {
     --safe-serialization
     --fp16
   )
-  if truthy "$LOCAL_FILES_ONLY"; then
+  if [[ "$USE_LOCAL_FILES_ONLY" -eq 1 ]]; then
     TRAIN_ARGS+=(--local-files-only)
     export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
     export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
@@ -1909,7 +1990,10 @@ compose_results() {
 }
 
 echo "Run configuration:"
-echo "  base_model: $BASE_MODEL"
+normalize_base_model_source
+echo "  base_model_source: $BASE_MODEL_SOURCE"
+echo "  training_model: $TRAIN_MODEL"
+echo "  local_files_only_mode: $LOCAL_FILES_ONLY"
 echo "  train_jsonl: $TRAIN_JSONL"
 echo "  iot200_jsonl: $IOT200_JSONL"
 echo "  output_dir: $OUTPUT_DIR"
@@ -1925,6 +2009,7 @@ echo "  measure_iters: $MEASURE_ITERS"
 
 write_helpers
 run_env_report
+materialize_hf_base_model
 run_training
 run_prune_eval
 run_onnx_export
@@ -1941,4 +2026,4 @@ echo "Final metrics CSV: ${OUTPUT_DIR}/results/final_metrics.csv"
 echo
 echo "Example command:"
 echo "  bash scripts/run_h20_encoder_decoder_sft_prune_trt24.sh \\"
-echo "    --base_model /PATH/TO/BASE_MODEL"
+echo "    --base_model charent/ChatLM-mini-Chinese"
