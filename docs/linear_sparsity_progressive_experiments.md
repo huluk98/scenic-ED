@@ -1,0 +1,147 @@
+# Linear Sparsity and Progressive Recovery Experiments
+
+## Purpose
+
+This experiment block addresses the revision question of whether SCENIC pruning conclusions remain stable across multiple sparsity levels and whether progressive recovery fine-tuning improves accuracy retention. It evaluates dense 0% sparsity, one-shot magnitude pruning at 30% and 50%, and progressive magnitude pruning with recovery fine-tuning at 30% and 50%.
+
+## Experimental Conditions
+
+- `dense`: no pruning, target sparsity 0.0.
+- `oneshot`: selected `torch.nn.Linear.weight` tensors are pruned once after checkpoint loading. This is the original manuscript-style pruning condition.
+- `progressive`: selected Linear weights are pruned through staged masks. By default, the added progressive method performs one final recovery epoch after all pruning stages; per-stage recovery is available as an explicit ablation.
+
+The default sparsity levels are 0%, 30%, and 50%. These add a moderate pruning point and preserve the manuscript's current 50% setting so the paper can show whether conclusions are stable under less aggressive compression.
+
+## Pruning Scope
+
+The runner prunes only Linear weights by default. It excludes biases, embeddings, normalization parameters, `lm_head`, classifier heads, response heads, final projection heads, and other output-head-like modules.
+
+Use `--prune_output_heads` only for an explicit ablation. The default is false.
+
+The outputs report both:
+
+- `targeted_linear_sparsity_actual`: sparsity over the selected Linear weights only.
+- `whole_model_sparsity_actual`: sparsity over all model parameters.
+
+These differ because embeddings, norms, heads, and other excluded parameters remain dense.
+
+## Pruning Methods
+
+The new controlled experiment uses magnitude pruning:
+
+- Per-layer unstructured pruning by default.
+- Lowest absolute values are masked to reach the requested sparsity in every selected Linear layer.
+- `--global_pruning` switches to a global threshold over all selected Linear weights.
+
+Masks are saved with each pruned checkpoint and enforced after each recovery optimizer step. Regrowth is disabled by default; use `--regrowth` only for an explicit regrowth experiment.
+
+## Progressive Schedule
+
+For target 30%:
+
+- 10%, 20%, 30%
+
+For target 50%:
+
+- 10%, 20%, 30%, 40%, 50%
+
+At each stage, the runner updates masks and logs stage sparsity, validation EM@1, validation EM@5, and loss. The default keeps `--recovery_epochs_per_stage 0` and `--final_recovery_epochs 1`, so the added progressive methods have only one recovery fine-tuning epoch. Set `--recovery_epochs_per_stage 1` for the fuller staged-recovery ablation.
+
+## EM@1 and EM@5
+
+The evaluator normalizes predictions and targets before exact match:
+
+- strip whitespace
+- Unicode NFKC normalization
+- collapse duplicated spaces
+- standardize common punctuation variants
+- preserve Chinese characters
+- optionally remove all spaces with `--normalization_mode ignore_spaces`
+
+For encoder-decoder and decoder-only models, the runner uses deterministic beam generation and forces at least five return sequences for EM@5. For encoder-only models, it expects `model.config.id2label` so top logits can map to canonical responses.
+
+## Difficulty Labels
+
+Difficulty is required for final reports. The evaluator first uses a benchmark field named `difficulty`, `complexity`, or `level`. If the benchmark lacks such a field, pass `--benchmark_difficulty_path`.
+
+Supported external difficulty file formats are CSV, JSON, or JSONL with:
+
+- `id,difficulty`
+- `sample_id,difficulty`
+- `input,difficulty`
+
+The join order is sample id first, then exact input string. The runner raises an error rather than guessing labels.
+
+Create a template with:
+
+```bash
+python scripts/create_benchmark_difficulty_template.py \
+  --benchmark_path generated/iot_instruction_benchmark_200.json \
+  --output_dir results/difficulty_labels
+```
+
+Fill `difficulty` with `easy`, `medium`, or `hard`.
+
+## Reproduce Runs
+
+Run the complete revised experiment suite from the original Hugging Face model with:
+
+```bash
+bash scripts/run_full_revision_experiments.sh
+```
+
+The default base model is `charent/ChatLM-mini-Chinese`. The launcher fine-tunes both regular SFT and contrastive SFT for five epochs, runs the existing one-shot 50% pruning/eval suite, runs the new 0/30/50 sparsity matrix for both checkpoints, and then runs ONNX FP32/FP16/INT8 precision benchmarks for both checkpoints.
+
+To pass a different original model:
+
+```bash
+bash scripts/run_full_revision_experiments.sh another/model-or-local-path
+```
+
+Example encoder-decoder run:
+
+```bash
+python scripts/run_sparsity_experiments.py \
+  --experiment_name scenic_linear_sparsity_0_30_50 \
+  --model_family encoder_decoder \
+  --model_checkpoint PATH_TO_CHECKPOINT \
+  --benchmark_path generated/iot_instruction_benchmark_200.json \
+  --benchmark_difficulty_path results/difficulty_labels/benchmark_difficulty_template.csv \
+  --sparsity_levels 0 0.3 0.5 \
+  --pruning_modes dense oneshot progressive \
+  --prune_scope linear_weights \
+  --prune_method magnitude \
+  --recovery_epochs_per_stage 0 \
+  --final_recovery_epochs 1 \
+  --num_beams 5 \
+  --num_return_sequences 5 \
+  --seed 42 \
+  --output_dir results/scenic_linear_sparsity_0_30_50
+```
+
+Run one command per model family/checkpoint. Use `--model_family encoder_only`, `decoder_only`, or `encoder_decoder` as appropriate.
+
+## Outputs
+
+The runner writes:
+
+- `predictions_{model_family}_{pruning_mode}_{sparsity}_{seed}.csv`
+- `summary_metrics.csv`
+- `paper_table_sparsity_difficulty.csv`
+- `progressive_logs_{model_family}_{target_sparsity}_{seed}.csv`
+- `checkpoints/.../linear_weight_masks.pt`
+- saved pruned/recovered checkpoints
+- `experiment_config.json`
+
+Create figures with:
+
+```bash
+python scripts/plot_sparsity_results.py \
+  --summary_csv results/scenic_linear_sparsity_0_30_50/summary_metrics.csv
+```
+
+Figures are saved under `results/{experiment_name}/figures/`.
+
+## Paper Use
+
+Use `paper_table_sparsity_difficulty.csv` for the main revised-paper table. It reports overall, easy, medium, and hard EM@1/EM@5 together with targeted Linear sparsity and whole-model sparsity. Use `summary_metrics.csv` for confidence intervals and accuracy-retention values relative to dense 0%.
