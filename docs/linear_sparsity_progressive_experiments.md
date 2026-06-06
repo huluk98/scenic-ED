@@ -12,6 +12,8 @@ This experiment block addresses the revision question of whether SCENIC pruning 
 
 The default sparsity levels are 0%, 30%, and 50%. These add a moderate pruning point and preserve the manuscript's current 50% setting so the paper can show whether conclusions are stable under less aggressive compression.
 
+The full revision launcher also adds a legacy one-shot 30% follow-up for the named pruning methods that can genuinely hit 30% targeted sparsity: `magnitude`, `wanda`, and `gradient`. `nvidia24` is not included in that 30% add-on by default because 2:4 structured pruning is effectively 50% selected-weight sparsity.
+
 ## Pruning Scope
 
 The runner prunes only Linear weights by default. It excludes biases, embeddings, normalization parameters, `lm_head`, classifier heads, response heads, final projection heads, and other output-head-like modules.
@@ -91,6 +93,14 @@ bash scripts/run_full_revision_experiments.sh
 ```
 
 The default base model is `charent/ChatLM-mini-Chinese`. The launcher fine-tunes both regular SFT and contrastive SFT for five epochs, runs the existing one-shot 50% pruning/eval suite, runs the new 0/30/50 sparsity matrix for both checkpoints, and then runs ONNX FP32/FP16/INT8 precision benchmarks for both checkpoints.
+
+If a full run has already completed and its 0%/50% results look good, add only the 30% follow-up without retraining or rerunning the whole matrix:
+
+```bash
+bash scripts/run_30pct_revision_experiments.sh results/ChatLM-mini-Chinese_full_revision_YYYYMMDDTHHMMSSZ
+```
+
+By default this only runs the missing legacy 30% one-shot methods and writes `legacy_oneshot_30/`. Set `RUN_SPARSITY_30=1` if you also need a standalone 30%-only linear `oneshot`/`progressive` rerun; otherwise the main full launcher already includes `oneshot_30` and `progressive_30` in `linear_sparsity_0_30_50/`.
 
 To pass a different original model:
 

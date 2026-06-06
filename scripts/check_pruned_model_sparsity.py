@@ -89,7 +89,7 @@ def resolve_path(raw_path: str | Path, *, base_dir: Path, report_dir: Path | Non
 
 def method_from_dir(path: Path) -> str:
     parent = path.parent.name
-    for suffix in ("_50", "-50"):
+    for suffix in ("_50", "-50", "_30", "-30"):
         if parent.endswith(suffix):
             return parent[: -len(suffix)]
     return parent or "unknown"
@@ -429,6 +429,10 @@ def inspect_model_dir(entry: ModelEntry, expected_sparsity: float, tolerance: fl
             },
             "linear_scopes": scope_results,
             "expected_scope_result": expected_scope_result,
+            "full_model_matches_expected_sparsity": full_model_matches,
+            "expected_scope_matches_expected_sparsity": expected_scope_matches,
+            "expected_scope_layers_match_expected_sparsity": expected_scope_layers_match,
+            "expected_basis_matches_expected_sparsity": expected_basis_matches,
             "full_model_is_50_percent_sparse": full_model_matches,
             "expected_scope_is_50_percent_sparse": expected_scope_matches,
             "expected_scope_layers_are_50_percent_sparse": expected_scope_layers_match,
@@ -470,7 +474,7 @@ def print_table(results: list[dict[str, Any]]) -> None:
     header = (
         f"{'label':18s} {'method':12s} {'status':18s} {'overall':>9s} "
         f"{'active':>14s} {'basis':12s} {'scope':15s} {'scope_sp':>9s} "
-        f"{'scope_act':>14s} {'basis50':>8s} {'full50':>7s} {'scope50':>8s} {'layers50':>8s}"
+        f"{'scope_act':>14s} {'basis_ok':>8s} {'full_ok':>7s} {'scope_ok':>8s} {'layers_ok':>9s}"
     )
     print(header)
     print("-" * len(header))
@@ -488,10 +492,10 @@ def print_table(results: list[dict[str, Any]]) -> None:
             f"{result['overall']['sparsity']:9.4f} {result['overall']['active']:14d} "
             f"{result.get('expected_basis', '')[:12]:12s} {scope:15s} {scope_sparsity:9.4f} "
             f"{result['expected_scope_result'].get('active', 0):14d} "
-            f"{str(result['expected_basis_is_50_percent_sparse']):>8s} "
-            f"{str(result['full_model_is_50_percent_sparse']):>7s} "
-            f"{str(result['expected_scope_is_50_percent_sparse']):>8s} "
-            f"{str(result['expected_scope_layers_are_50_percent_sparse']):>8s}"
+            f"{str(result['expected_basis_matches_expected_sparsity']):>8s} "
+            f"{str(result['full_model_matches_expected_sparsity']):>7s} "
+            f"{str(result['expected_scope_matches_expected_sparsity']):>8s} "
+            f"{str(result['expected_scope_layers_match_expected_sparsity']):>9s}"
         )
 
 
@@ -502,23 +506,47 @@ def build_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
         status_counts[status] = status_counts.get(status, 0) + 1
 
     ok_results = [result for result in results if result.get("status") == "ok"]
-    full_50 = [result for result in ok_results if result.get("full_model_is_50_percent_sparse")]
-    scope_50 = [result for result in ok_results if result.get("expected_scope_is_50_percent_sparse")]
-    basis_50 = [result for result in ok_results if result.get("expected_basis_is_50_percent_sparse")]
-    layer_50 = [result for result in ok_results if result.get("expected_scope_layers_are_50_percent_sparse")]
+    full_matches = [result for result in ok_results if result.get("full_model_matches_expected_sparsity")]
+    scope_matches = [result for result in ok_results if result.get("expected_scope_matches_expected_sparsity")]
+    basis_matches = [result for result in ok_results if result.get("expected_basis_matches_expected_sparsity")]
+    layer_matches = [
+        result for result in ok_results if result.get("expected_scope_layers_match_expected_sparsity")
+    ]
     return {
         "total_entries": len(results),
         "ok_entries": len(ok_results),
         "status_counts": status_counts,
-        "full_model_50_percent_sparse_count": len(full_50),
-        "expected_scope_50_percent_sparse_count": len(scope_50),
-        "expected_basis_50_percent_sparse_count": len(basis_50),
-        "expected_scope_layers_50_percent_sparse_count": len(layer_50),
-        "all_existing_models_full_50_percent_sparse": bool(ok_results) and len(full_50) == len(ok_results),
-        "all_existing_models_expected_scope_50_percent_sparse": bool(ok_results) and len(scope_50) == len(ok_results),
-        "all_existing_models_expected_basis_50_percent_sparse": bool(ok_results) and len(basis_50) == len(ok_results),
+        "full_model_expected_sparsity_count": len(full_matches),
+        "expected_scope_expected_sparsity_count": len(scope_matches),
+        "expected_basis_expected_sparsity_count": len(basis_matches),
+        "expected_scope_layers_expected_sparsity_count": len(layer_matches),
+        "all_existing_models_full_expected_sparsity": (
+            bool(ok_results) and len(full_matches) == len(ok_results)
+        ),
+        "all_existing_models_expected_scope_expected_sparsity": (
+            bool(ok_results) and len(scope_matches) == len(ok_results)
+        ),
+        "all_existing_models_expected_basis_expected_sparsity": (
+            bool(ok_results) and len(basis_matches) == len(ok_results)
+        ),
+        "all_existing_models_expected_scope_layers_expected_sparsity": (
+            bool(ok_results) and len(layer_matches) == len(ok_results)
+        ),
+        "full_model_50_percent_sparse_count": len(full_matches),
+        "expected_scope_50_percent_sparse_count": len(scope_matches),
+        "expected_basis_50_percent_sparse_count": len(basis_matches),
+        "expected_scope_layers_50_percent_sparse_count": len(layer_matches),
+        "all_existing_models_full_50_percent_sparse": (
+            bool(ok_results) and len(full_matches) == len(ok_results)
+        ),
+        "all_existing_models_expected_scope_50_percent_sparse": (
+            bool(ok_results) and len(scope_matches) == len(ok_results)
+        ),
+        "all_existing_models_expected_basis_50_percent_sparse": (
+            bool(ok_results) and len(basis_matches) == len(ok_results)
+        ),
         "all_existing_models_expected_scope_layers_50_percent_sparse": (
-            bool(ok_results) and len(layer_50) == len(ok_results)
+            bool(ok_results) and len(layer_matches) == len(ok_results)
         ),
     }
 
@@ -586,10 +614,10 @@ def main() -> None:
     print(
         "Summary: "
         f"ok={summary['ok_entries']}/{summary['total_entries']} "
-        f"basis50={summary['expected_basis_50_percent_sparse_count']} "
-        f"scope50={summary['expected_scope_50_percent_sparse_count']} "
-        f"layers50={summary['expected_scope_layers_50_percent_sparse_count']} "
-        f"full50={summary['full_model_50_percent_sparse_count']}"
+        f"basis_ok={summary['expected_basis_expected_sparsity_count']} "
+        f"scope_ok={summary['expected_scope_expected_sparsity_count']} "
+        f"layers_ok={summary['expected_scope_layers_expected_sparsity_count']} "
+        f"full_ok={summary['full_model_expected_sparsity_count']}"
     )
 
     if args.output_json:
@@ -616,11 +644,11 @@ def main() -> None:
                 "Sparsity check failed: "
                 f"only {summary['ok_entries']} of {summary['total_entries']} model entries were inspectable."
             )
-        if not summary["all_existing_models_expected_basis_50_percent_sparse"]:
+        if not summary["all_existing_models_expected_basis_expected_sparsity"]:
             raise SystemExit(
                 "Sparsity check failed: at least one model did not match the expected sparsity basis."
             )
-        if not summary["all_existing_models_expected_scope_layers_50_percent_sparse"]:
+        if not summary["all_existing_models_expected_scope_layers_expected_sparsity"]:
             raise SystemExit(
                 "Sparsity check failed: at least one expected-scope linear layer did not match "
                 f"{args.expected_sparsity:.4f} within tolerance {args.tolerance}."

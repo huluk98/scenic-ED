@@ -13,10 +13,11 @@ This one launcher:
   1. Fine-tunes the original model for 5 epochs with regular SFT.
   2. Fine-tunes the original model for 5 epochs with contrastive/triplet SFT.
   3. Runs the existing one-shot 50% pruning/eval suite for both checkpoints.
-  4. Runs the new 0/30/50 linear sparsity matrix for both checkpoints:
+  4. Runs the added one-shot 30% pruning/eval suite for both checkpoints.
+  5. Runs the new 0/30/50 linear sparsity matrix for both checkpoints:
        dense_0, oneshot_30, oneshot_50, progressive_30, progressive_50
      Progressive methods default to one final recovery epoch total.
-  5. Runs ONNX FP32/FP16/INT8 precision benchmark tables for both checkpoints.
+  6. Runs ONNX FP32/FP16/INT8 precision benchmark tables for both checkpoints.
 
 Common overrides:
   REVISION_OUTPUT_ROOT=results/scenic_revision_full_run
@@ -25,8 +26,10 @@ Common overrides:
   NPROC_PER_NODE=8
   LOCAL_FILES_ONLY=0
   RUN_LEGACY_PRUNE=1
+  RUN_LEGACY_ONESHOT_30=1
   RUN_SPARSITY=1
   RUN_ONNX=1
+  LEGACY_30_PRUNE_METHODS="magnitude wanda gradient"
   SPARSITY_LEVELS="0 0.3 0.5"
   SPARSITY_PRUNING_MODES="dense oneshot progressive"
   SPARSITY_RECOVERY_EPOCHS_PER_STAGE=0
@@ -58,6 +61,7 @@ REVISION_OUTPUT_ROOT="${REVISION_OUTPUT_ROOT:-results/${SAFE_BASE}_full_revision
 LEGACY_OUTPUT_ROOT="${LEGACY_OUTPUT_ROOT:-${REVISION_OUTPUT_ROOT}/legacy_regular_contrastive_5epoch_prune50}"
 REGULAR_OUTPUT_DIR="${REGULAR_OUTPUT_DIR:-${LEGACY_OUTPUT_ROOT}/regular_sft_5epoch}"
 CONTRASTIVE_OUTPUT_DIR="${CONTRASTIVE_OUTPUT_DIR:-${LEGACY_OUTPUT_ROOT}/contrastive_sft_5epoch}"
+LEGACY_30_OUTPUT_ROOT="${LEGACY_30_OUTPUT_ROOT:-${REVISION_OUTPUT_ROOT}/legacy_oneshot_30}"
 SPARSITY_OUTPUT_ROOT="${SPARSITY_OUTPUT_ROOT:-${REVISION_OUTPUT_ROOT}/linear_sparsity_0_30_50}"
 ONNX_OUTPUT_ROOT="${ONNX_OUTPUT_ROOT:-${REVISION_OUTPUT_ROOT}/onnx_precision}"
 FINAL_MANIFEST="${FINAL_MANIFEST:-${REVISION_OUTPUT_ROOT}/full_revision_manifest.txt}"
@@ -69,11 +73,15 @@ BENCHMARK_JSON="${BENCHMARK_JSON:-generated/iot_instruction_benchmark_200.json}"
 REGULAR_TRAIN_JSON="${REGULAR_TRAIN_JSON:-data/SCENIC_full_training_dataset.json}"
 CONTRASTIVE_TRAIN_JSON="${CONTRASTIVE_TRAIN_JSON:-data/SCENIC_full_anchor_positive_negative.json}"
 EVAL_TRAIN_JSON="${EVAL_TRAIN_JSON:-data/SCENIC_full_training_dataset.json}"
+CALIBRATION_JSON="${CALIBRATION_JSON:-$EVAL_TRAIN_JSON}"
 MODEL_FAMILY="${MODEL_FAMILY:-encoder_decoder}"
+IGNORE_SPACES="${IGNORE_SPACES:-1}"
 
 RUN_LEGACY_PRUNE="${RUN_LEGACY_PRUNE:-1}"
+RUN_LEGACY_ONESHOT_30="${RUN_LEGACY_ONESHOT_30:-1}"
 RUN_SPARSITY="${RUN_SPARSITY:-1}"
 RUN_ONNX="${RUN_ONNX:-1}"
+LEGACY_30_PRUNE_METHODS="${LEGACY_30_PRUNE_METHODS:-magnitude wanda gradient}"
 
 SPARSITY_LEVELS="${SPARSITY_LEVELS:-0 0.3 0.5}"
 SPARSITY_PRUNING_MODES="${SPARSITY_PRUNING_MODES:-dense oneshot progressive}"
@@ -119,6 +127,8 @@ if truthy "$RUN_LEGACY_PRUNE"; then
   CONTRASTIVE_TRAIN_JSON="$CONTRASTIVE_TRAIN_JSON" \
   EVAL_TRAIN_JSON="$EVAL_TRAIN_JSON" \
   BENCHMARK_JSON="$BENCHMARK_JSON" \
+  CALIBRATION_JSON="$CALIBRATION_JSON" \
+  IGNORE_SPACES="$IGNORE_SPACES" \
   bash scripts/run_sft_contrastive_5epoch_all_prune_50.sh "$BASE_MODEL" "${legacy_eval_args[@]}"
 else
   echo "RUN_LEGACY_PRUNE=0; expecting checkpoints to already exist."
@@ -131,6 +141,39 @@ fi
 if [[ ! -f "${CONTRASTIVE_OUTPUT_DIR}/config.json" ]]; then
   echo "Missing contrastive checkpoint after training step: ${CONTRASTIVE_OUTPUT_DIR}" >&2
   exit 1
+fi
+
+if truthy "$RUN_LEGACY_ONESHOT_30"; then
+  echo
+  echo "== Step 1b: added one-shot 30% prune/eval using existing checkpoints =="
+  PYTHON="$PYTHON" \
+  BASE_MODEL="$BASE_MODEL" \
+  EPOCHS="$EPOCHS" \
+  SEED="$SEED" \
+  REVISION_OUTPUT_ROOT="$REVISION_OUTPUT_ROOT" \
+  LEGACY_OUTPUT_ROOT="$LEGACY_OUTPUT_ROOT" \
+  REGULAR_OUTPUT_DIR="$REGULAR_OUTPUT_DIR" \
+  CONTRASTIVE_OUTPUT_DIR="$CONTRASTIVE_OUTPUT_DIR" \
+  LEGACY_30_OUTPUT_ROOT="$LEGACY_30_OUTPUT_ROOT" \
+  REGULAR_TRAIN_JSON="$REGULAR_TRAIN_JSON" \
+  CONTRASTIVE_TRAIN_JSON="$CONTRASTIVE_TRAIN_JSON" \
+  EVAL_TRAIN_JSON="$EVAL_TRAIN_JSON" \
+  BENCHMARK_JSON="$BENCHMARK_JSON" \
+  CALIBRATION_JSON="$CALIBRATION_JSON" \
+  LEGACY_30_PRUNE_METHODS="$LEGACY_30_PRUNE_METHODS" \
+  NPROC_PER_NODE="${NPROC_PER_NODE:-}" \
+  PRUNE_SCOPE="${PRUNE_SCOPE:-all-linear}" \
+  SPARSITY_BASIS="${SPARSITY_BASIS:-targeted-linear}" \
+  PRUNE_LM_HEAD="${PRUNE_LM_HEAD:-0}" \
+  IGNORE_SPACES="$IGNORE_SPACES" \
+  MAX_TRAIN_EXAMPLES="${MAX_TRAIN_EXAMPLES:-}" \
+  MAX_BENCHMARK_EXAMPLES="${MAX_BENCHMARK_EXAMPLES:-}" \
+  MAX_CALIBRATION_EXAMPLES="${MAX_CALIBRATION_EXAMPLES:-}" \
+  RUN_LEGACY_ONESHOT_30=1 \
+  RUN_SPARSITY_30=0 \
+  bash scripts/run_30pct_revision_experiments.sh "$REVISION_OUTPUT_ROOT"
+else
+  echo "RUN_LEGACY_ONESHOT_30=0; skipping legacy one-shot 30% suite."
 fi
 
 run_sparsity_matrix() {
@@ -211,6 +254,8 @@ base_model=${BASE_MODEL}
 output_root=${REVISION_OUTPUT_ROOT}
 legacy_report=${LEGACY_OUTPUT_ROOT}/all_sft_contrastive_pruning_em_report.json
 legacy_sparsity_check=${LEGACY_OUTPUT_ROOT}/sparsity_check.json
+legacy_30_report=${LEGACY_30_OUTPUT_ROOT}/all_sft_contrastive_pruning_em_report_30.json
+legacy_30_sparsity_check=${LEGACY_30_OUTPUT_ROOT}/sparsity_check_30.json
 regular_checkpoint=${REGULAR_OUTPUT_DIR}
 contrastive_checkpoint=${CONTRASTIVE_OUTPUT_DIR}
 regular_sparsity_summary=${SPARSITY_OUTPUT_ROOT}/regular_sft/summary_metrics.csv
