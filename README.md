@@ -1,5 +1,11 @@
 # SCENIC ED
 
+Run the 50% gradient-pruned ONNX FP16/INT8 ASIC baseline:
+
+```bash
+NPROC_PER_NODE=8 ACCURACY_GPU_IDS=0,1,2,3,4,5,6,7 bash scripts/run_gradient50_onnx_quant_baseline.sh charent/ChatLM-mini-Chinese
+```
+
 SCENIC edge-device training utilities and compact dataset artifacts for ChatLM-mini-Chinese SFT experiments.
 
 ## Kept Dataset Files
@@ -267,6 +273,19 @@ bash scripts/run_prune_eval_50.sh models/chatlm_scenic_triplet_sft
 ```
 
 The launcher writes one combined JSON report containing the original pre-prune EM@1/EM@5, the pruned EM@1/EM@5, benchmark results, full training-set results, model identity metadata, pruning stats, and predictions. By default it uses magnitude pruning and auto-detects available NVIDIA GPUs for evaluation.
+
+### Gradient-50 ONNX Quantized Baseline
+
+For the sparse quantized ASIC baseline, run the one-command launcher from the original Hugging Face model:
+
+```bash
+NPROC_PER_NODE=8 ACCURACY_GPU_IDS=0,1,2,3,4,5,6,7 \
+bash scripts/run_gradient50_onnx_quant_baseline.sh charent/ChatLM-mini-Chinese
+```
+
+This trains regular SFT for 5 epochs, creates the 50% gradient one-shot pruned checkpoint, exports dense and pruned ONNX FP16, exports FP32 ONNX sources, dynamic-quantizes them to ONNX INT8, evaluates benchmark/training EM@1 and EM@5, then benchmarks isolated latency, p95 latency, TPS, peak memory, and model size. Accuracy evaluations are fanned out across the listed GPUs, while latency is run sequentially so the timing numbers are not contaminated by parallel jobs. The final JSON is `<OUTPUT_ROOT>/all_deployment_em_latency_report.json` and includes `accuracy_delta_table`, `model_size_table`, `runtime_benchmark`, and target/whole-model sparsity from the pruning summary.
+
+This is intended as a sparse quantized baseline for true ASIC comparison, not as a complete edge deployment claim. Gradient pruning is unstructured, so `TENSORRT_SPARSITY_ENABLE` defaults to `0`; only set it to `1` for a structured NVIDIA 2:4 run.
 
 Choose another 50% pruning method with `METHOD`:
 

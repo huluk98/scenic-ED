@@ -8,11 +8,12 @@ Usage:
 
 End-to-end SCENIC deployment pass:
   1. Fine-tune the original model for 5 epochs with regular SFT.
-  2. Create a NVIDIA 2:4 pruned checkpoint from the fine-tuned model.
-  3. Export dense and 2:4-pruned checkpoints to ONNX FP16.
+  2. Create a 50% gradient one-shot pruned checkpoint from the fine-tuned model.
+  3. Export dense and gradient-pruned checkpoints to ONNX FP16.
   4. Export FP32 ONNX sources and dynamic-quantize them to ONNX INT8.
   5. Run EM@1 / EM@5 on both the 200-example benchmark and training data.
-  6. Benchmark batch=1 deployment latency for PyTorch FP16 and ONNX FP16.
+  6. Benchmark batch=1 deployment latency/TPS for PyTorch FP16, ONNX FP16,
+     and ONNX INT8.
      TensorRT FP16 is ready behind RUN_TENSORRT=1 when that runtime is available.
 
 Main outputs:
@@ -39,7 +40,17 @@ Training:
   FINETUNE_OUTPUT_DIR=<output-root>/checkpoints/sft5
   TRAIN_BATCH_SIZE=4
   TRAIN_GRADIENT_ACCUMULATION_STEPS=4
-  TRAIN_NPROC_PER_NODE=1
+  TRAIN_NPROC_PER_NODE=8
+
+Pruning:
+  PRUNE_METHOD=gradient        # gradient, magnitude, wanda, or nvidia
+  SPARSITY=0.5
+  PRUNE_SCOPE=all-linear
+  SPARSITY_BASIS=targeted-linear
+  PRUNE_LM_HEAD=0
+  CALIBRATION_JSON=data/SCENIC_full_training_dataset.json
+  CALIBRATION_BATCH_SIZE=4
+  CALIBRATION_BATCHES=64
 
 Accuracy:
   BENCHMARK_JSON=generated/iot_instruction_benchmark_200.json
@@ -50,6 +61,8 @@ Accuracy:
   NUM_RETURN_SEQUENCES=5
   MAX_INPUT_LEN=256
   MAX_NEW_TOKENS=128
+  RUN_ACCURACY_PARALLEL=1
+  ACCURACY_GPU_IDS="0,1,2,3,4,5,6,7"
 
 Latency:
   LATENCY_SEQ_LENGTHS="64 128"
@@ -62,11 +75,12 @@ Latency:
 TensorRT:
   RUN_TENSORRT=0        # default: do not run TensorRT on non-TensorRT machines
   TENSORRT_REQUIRED=0   # set to 1 when TensorRT must be present
-  TENSORRT_SPARSITY_ENABLE=1 # ask TensorRT to use 2:4 sparse tactics when eligible
+  TENSORRT_SPARSITY_ENABLE=0 # gradient sparsity is unstructured, not 2:4
   TENSORRT_ENGINE_CACHE_ROOT=<output-root>/tensorrt_engines
 
 INT8:
   RUN_INT8=1
+  INT8_ONNX_PROVIDER=CUDAExecutionProvider
 
 Example smoke test:
   FINETUNE_EPOCHS=1 MAX_BENCHMARK_EXAMPLES=20 MAX_TRAIN_EXAMPLES=20 LATENCY_QUERIES=20 \
@@ -98,7 +112,16 @@ RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
 SAFE_MODEL_NAME="$(basename "$ORIGINAL_MODEL" | tr -c 'A-Za-z0-9_.-' '_')"
 SAFE_MODEL_NAME="${SAFE_MODEL_NAME%_}"
 SAFE_MODEL_NAME="${SAFE_MODEL_NAME:-model}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-onnx_eval_outputs/${SAFE_MODEL_NAME}_sft5_nvidia24_deploy_${RUN_ID}}"
+PRUNE_METHOD="${PRUNE_METHOD:-gradient}"
+SPARSITY="${SPARSITY:-0.5}"
+case "$SPARSITY" in
+  0.5|.5|0.50) SPARSITY_TAG="50" ;;
+  0.3|.3|0.30) SPARSITY_TAG="30" ;;
+  *) SPARSITY_TAG="$(printf '%s' "$SPARSITY" | tr -c 'A-Za-z0-9_.-' '_' | sed 's/_$//')" ;;
+esac
+PRUNED_VARIANT="${PRUNED_VARIANT:-${PRUNE_METHOD}${SPARSITY_TAG}}"
+PRUNED_PRETTY_LABEL="${PRUNED_PRETTY_LABEL:-${SPARSITY_TAG}% ${PRUNE_METHOD} pruned}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-onnx_eval_outputs/${SAFE_MODEL_NAME}_sft5_${PRUNED_VARIANT}_deploy_${RUN_ID}}"
 
 CHECKPOINT_ROOT="${OUTPUT_ROOT}/checkpoints"
 ONNX_ROOT="${OUTPUT_ROOT}/onnx"
@@ -119,12 +142,11 @@ TRAIN_WEIGHT_DECAY="${TRAIN_WEIGHT_DECAY:-0.01}"
 TRAIN_WARMUP_RATIO="${TRAIN_WARMUP_RATIO:-0.03}"
 TRAIN_MAX_SOURCE_LENGTH="${TRAIN_MAX_SOURCE_LENGTH:-256}"
 TRAIN_MAX_TARGET_LENGTH="${TRAIN_MAX_TARGET_LENGTH:-128}"
-TRAIN_NPROC_PER_NODE="${TRAIN_NPROC_PER_NODE:-1}"
+TRAIN_NPROC_PER_NODE="${TRAIN_NPROC_PER_NODE:-${NPROC_PER_NODE:-8}}"
 TRAIN_PRECISION="${TRAIN_PRECISION:-fp16}"
 SKIP_TRAIN="${SKIP_TRAIN:-0}"
 FORCE_TRAIN="${FORCE_TRAIN:-0}"
 
-SPARSITY="${SPARSITY:-0.5}"
 PRUNE_SCOPE="${PRUNE_SCOPE:-all-linear}"
 SPARSITY_BASIS="${SPARSITY_BASIS:-targeted-linear}"
 PRUNE_LM_HEAD="${PRUNE_LM_HEAD:-0}"
@@ -132,6 +154,10 @@ FORCE_PRUNE="${FORCE_PRUNE:-0}"
 
 TRAIN_JSON="${TRAIN_JSON:-data/SCENIC_full_training_dataset.json}"
 BENCHMARK_JSON="${BENCHMARK_JSON:-generated/iot_instruction_benchmark_200.json}"
+CALIBRATION_JSON="${CALIBRATION_JSON:-$TRAIN_JSON}"
+CALIBRATION_BATCH_SIZE="${CALIBRATION_BATCH_SIZE:-4}"
+CALIBRATION_BATCHES="${CALIBRATION_BATCHES:-64}"
+MAX_CALIBRATION_EXAMPLES="${MAX_CALIBRATION_EXAMPLES:-}"
 MAX_TRAIN_EXAMPLES="${MAX_TRAIN_EXAMPLES:-}"
 MAX_BENCHMARK_EXAMPLES="${MAX_BENCHMARK_EXAMPLES:-200}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-1}"
@@ -142,6 +168,9 @@ MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-128}"
 INCLUDE_PREDICTIONS="${INCLUDE_PREDICTIONS:-1}"
 IGNORE_SPACES="${IGNORE_SPACES:-1}"
 FORCE_ACCURACY="${FORCE_ACCURACY:-0}"
+RUN_ACCURACY_PARALLEL="${RUN_ACCURACY_PARALLEL:-1}"
+ACCURACY_GPU_IDS="${ACCURACY_GPU_IDS:-}"
+ACCURACY_PYTORCH_DEVICE="${ACCURACY_PYTORCH_DEVICE:-cuda}"
 
 LATENCY_SEQ_LENGTHS="${LATENCY_SEQ_LENGTHS:-64 128}"
 LATENCY_BATCH_SIZE="${LATENCY_BATCH_SIZE:-1}"
@@ -159,7 +188,11 @@ FP32_EXPORT_DEVICE="${FP32_EXPORT_DEVICE:-cpu}"
 RUN_INT8="${RUN_INT8:-1}"
 RUN_TENSORRT="${RUN_TENSORRT:-0}"
 TENSORRT_REQUIRED="${TENSORRT_REQUIRED:-0}"
-TENSORRT_SPARSITY_ENABLE="${TENSORRT_SPARSITY_ENABLE:-1}"
+if [[ "$PRUNE_METHOD" == "nvidia" ]]; then
+  TENSORRT_SPARSITY_ENABLE="${TENSORRT_SPARSITY_ENABLE:-1}"
+else
+  TENSORRT_SPARSITY_ENABLE="${TENSORRT_SPARSITY_ENABLE:-0}"
+fi
 OPTIMUM_DTYPE_MODE="${OPTIMUM_DTYPE_MODE:-auto}"
 FORCE_EXPORT="${FORCE_EXPORT:-0}"
 FORCE_QUANTIZE="${FORCE_QUANTIZE:-0}"
@@ -173,19 +206,19 @@ else
   PYTORCH_DEVICE="${PYTORCH_DEVICE:-cpu}"
   FP16_ONNX_PROVIDER="${FP16_ONNX_PROVIDER:-CPUExecutionProvider}"
 fi
-INT8_ONNX_PROVIDER="${INT8_ONNX_PROVIDER:-CPUExecutionProvider}"
+INT8_ONNX_PROVIDER="${INT8_ONNX_PROVIDER:-$FP16_ONNX_PROVIDER}"
 TENSORRT_ONNX_PROVIDER="${TENSORRT_ONNX_PROVIDER:-TensorrtExecutionProvider}"
 
 FINETUNED_CHECKPOINT_DIR="$FINETUNE_OUTPUT_DIR"
-PRUNED_CHECKPOINT_DIR="${CHECKPOINT_ROOT}/sft5_nvidia24_pruned"
-PRUNED_SUMMARY_JSON="${CHECKPOINT_ROOT}/sft5_nvidia24_pruning_summary.json"
+PRUNED_CHECKPOINT_DIR="${CHECKPOINT_ROOT}/sft5_${PRUNED_VARIANT}_pruned"
+PRUNED_SUMMARY_JSON="${CHECKPOINT_ROOT}/sft5_${PRUNED_VARIANT}_pruning_summary.json"
 
 FP16_DENSE_ONNX="${ONNX_ROOT}/sft5_fp16_dense"
-FP16_NVIDIA24_ONNX="${ONNX_ROOT}/sft5_fp16_nvidia24"
+FP16_PRUNED_ONNX="${ONNX_ROOT}/sft5_fp16_pruned"
 FP32_DENSE_ONNX="${INTERMEDIATE_ROOT}/sft5_fp32_dense_for_int8"
-FP32_NVIDIA24_ONNX="${INTERMEDIATE_ROOT}/sft5_fp32_nvidia24_for_int8"
+FP32_PRUNED_ONNX="${INTERMEDIATE_ROOT}/sft5_fp32_pruned_for_int8"
 INT8_DENSE_ONNX="${ONNX_ROOT}/sft5_int8_dense"
-INT8_NVIDIA24_ONNX="${ONNX_ROOT}/sft5_int8_nvidia24"
+INT8_PRUNED_ONNX="${ONNX_ROOT}/sft5_int8_pruned"
 RUNTIME_BENCHMARK_JSON="${REPORT_ROOT}/deployment_runtime_benchmark.json"
 
 truthy() {
@@ -193,6 +226,26 @@ truthy() {
     1|true|TRUE|yes|YES|y|Y|on|ON) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+detect_accuracy_gpu_ids() {
+  if [[ -n "$ACCURACY_GPU_IDS" ]]; then
+    printf '%s\n' "$ACCURACY_GPU_IDS"
+    return
+  fi
+  if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    printf '%s\n' "$CUDA_VISIBLE_DEVICES"
+    return
+  fi
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    local count
+    count="$(nvidia-smi -L | wc -l | tr -d ' ')"
+    if [[ "$count" != "0" ]]; then
+      seq -s, 0 $((count - 1))
+      return
+    fi
+  fi
+  printf '\n'
 }
 
 reset_output_dir() {
@@ -387,9 +440,9 @@ repair_checkpoint_assets() {
   fi
 }
 
-create_nvidia24_pruned_checkpoint() {
+create_pruned_checkpoint() {
   if [[ -f "${PRUNED_CHECKPOINT_DIR}/config.json" && -f "$PRUNED_SUMMARY_JSON" ]] && ! truthy "$FORCE_PRUNE"; then
-    echo "Skipping NVIDIA 2:4 prune; found ${PRUNED_CHECKPOINT_DIR}"
+    echo "Skipping ${PRUNED_PRETTY_LABEL}; found ${PRUNED_CHECKPOINT_DIR}"
     return
   fi
 
@@ -397,14 +450,21 @@ create_nvidia24_pruned_checkpoint() {
   mkdir -p "$PRUNED_CHECKPOINT_DIR"
   mkdir -p "$(dirname "$PRUNED_SUMMARY_JSON")"
 
-  echo "Creating NVIDIA 2:4 pruned checkpoint from fine-tuned model -> ${PRUNED_CHECKPOINT_DIR}"
+  echo "Creating ${PRUNED_PRETTY_LABEL} checkpoint from fine-tuned model -> ${PRUNED_CHECKPOINT_DIR}"
   MODEL_PATH="$FINETUNED_CHECKPOINT_DIR" \
   PRUNED_OUTPUT_DIR="$PRUNED_CHECKPOINT_DIR" \
   PRUNED_SUMMARY_JSON="$PRUNED_SUMMARY_JSON" \
+  PRUNE_METHOD="$PRUNE_METHOD" \
   SPARSITY="$SPARSITY" \
   PRUNE_SCOPE="$PRUNE_SCOPE" \
   SPARSITY_BASIS="$SPARSITY_BASIS" \
   PRUNE_LM_HEAD="$PRUNE_LM_HEAD" \
+  CALIBRATION_JSON="$CALIBRATION_JSON" \
+  CALIBRATION_BATCH_SIZE="$CALIBRATION_BATCH_SIZE" \
+  CALIBRATION_BATCHES="$CALIBRATION_BATCHES" \
+  MAX_CALIBRATION_EXAMPLES="$MAX_CALIBRATION_EXAMPLES" \
+  MAX_INPUT_LEN="$MAX_INPUT_LEN" \
+  TRAIN_MAX_TARGET_LENGTH="$TRAIN_MAX_TARGET_LENGTH" \
   LOCAL_FILES_ONLY=1 \
   TRUST_REMOTE_CODE="$TRUST_REMOTE_CODE" \
   PYTORCH_DEVICE="$PYTORCH_DEVICE" \
@@ -427,9 +487,11 @@ if str(SCRIPTS_DIR) not in sys.path:
 from scenic_prune_eval import (  # noqa: E402
     DistributedState,
     load_model_and_tokenizer,
-    nvidia_2_4_prune,
+    read_records,
+    run_pruning,
     save_pruned_model,
     summarize_model,
+    truncate_records,
     write_json,
 )
 
@@ -455,6 +517,9 @@ def resolve_device() -> torch.device:
 model_path = os.environ["MODEL_PATH"]
 out_dir = Path(os.environ["PRUNED_OUTPUT_DIR"]).expanduser()
 summary_json = Path(os.environ["PRUNED_SUMMARY_JSON"]).expanduser()
+calibration_json = Path(os.environ["CALIBRATION_JSON"]).expanduser()
+max_calibration_examples_raw = os.environ.get("MAX_CALIBRATION_EXAMPLES", "")
+max_calibration_examples = int(max_calibration_examples_raw) if max_calibration_examples_raw else None
 device = resolve_device()
 state = DistributedState(enabled=False, rank=0, local_rank=0, world_size=1, device=device)
 args = argparse.Namespace(
@@ -462,17 +527,22 @@ args = argparse.Namespace(
     local_files_only=env_bool("LOCAL_FILES_ONLY", True),
     bf16=False,
     fp16=True,
-    method="nvidia",
+    method=os.environ.get("PRUNE_METHOD", "gradient"),
     sparsity=float(os.environ.get("SPARSITY", "0.5")),
     sparsity_basis=os.environ.get("SPARSITY_BASIS", "targeted-linear"),
     prune_scope=os.environ.get("PRUNE_SCOPE", "all-linear"),
     prune_lm_head=env_bool("PRUNE_LM_HEAD", False),
     full_model_correction=True,
+    calibration_batch_size=int(os.environ.get("CALIBRATION_BATCH_SIZE", "4")),
+    calibration_batches=int(os.environ.get("CALIBRATION_BATCHES", "64")),
+    max_input_len=int(os.environ.get("MAX_INPUT_LEN", "256")),
+    max_target_len=int(os.environ.get("TRAIN_MAX_TARGET_LENGTH", "128")),
 )
 
+calibration_records = truncate_records(read_records(calibration_json), max_calibration_examples)
 tokenizer, model = load_model_and_tokenizer(args, model_path, state)
 before = summarize_model(model, model_path)
-pruning = nvidia_2_4_prune(model, args)
+pruning = run_pruning(model, tokenizer, calibration_records, args, state)
 after = summarize_model(model, str(out_dir))
 save_pruned_model(model, tokenizer, out_dir)
 write_json(
@@ -482,12 +552,14 @@ write_json(
         "input_model_path": model_path,
         "pruned_model_path": str(out_dir),
         "device": str(device),
+        "calibration_json": str(calibration_json),
+        "calibration_examples_loaded": len(calibration_records),
         "model_before_prune": before,
         "model_after_prune": after,
         "pruning": pruning,
     },
 )
-print(f"Wrote NVIDIA 2:4 pruning summary: {summary_json}")
+print(f"Wrote pruning summary: {summary_json}")
 PY
 }
 
@@ -889,6 +961,54 @@ print(f"Wrote accuracy report: {report_json}")
 PY
 }
 
+accuracy_gpu_ids=()
+accuracy_job_pids=()
+accuracy_job_labels=()
+accuracy_gpu_index=0
+
+prepare_accuracy_gpus() {
+  accuracy_gpu_ids=()
+  local gpu_csv
+  gpu_csv="$(detect_accuracy_gpu_ids)"
+  gpu_csv="${gpu_csv// /,}"
+  if [[ -n "$gpu_csv" ]]; then
+    IFS=',' read -r -a accuracy_gpu_ids <<< "$gpu_csv"
+  fi
+}
+
+run_accuracy_eval() {
+  local label="$1"
+  local pretty_label="$2"
+
+  if truthy "$RUN_ACCURACY_PARALLEL" && [[ "${#accuracy_gpu_ids[@]}" -gt 1 ]]; then
+    local gpu="${accuracy_gpu_ids[$((accuracy_gpu_index % ${#accuracy_gpu_ids[@]}))]}"
+    accuracy_gpu_index=$((accuracy_gpu_index + 1))
+    echo "Starting accuracy eval on GPU ${gpu}: ${pretty_label}"
+    (
+      export CUDA_VISIBLE_DEVICES="$gpu"
+      export PYTORCH_DEVICE="$ACCURACY_PYTORCH_DEVICE"
+      evaluate_accuracy_variant "$@"
+    ) &
+    accuracy_job_pids+=("$!")
+    accuracy_job_labels+=("$pretty_label")
+    return
+  fi
+
+  evaluate_accuracy_variant "$@"
+}
+
+wait_accuracy_evals() {
+  local status=0
+  local index
+  for index in "${!accuracy_job_pids[@]}"; do
+    if ! wait "${accuracy_job_pids[$index]}"; then
+      echo "Accuracy eval failed: ${accuracy_job_labels[$index]}" >&2
+      status=1
+    fi
+  done
+  return "$status"
+}
+
 benchmark_runtime() {
   if [[ -f "$RUNTIME_BENCHMARK_JSON" ]] && ! truthy "$FORCE_BENCHMARK"; then
     echo "Skipping runtime benchmark; found ${RUNTIME_BENCHMARK_JSON}"
@@ -900,7 +1020,9 @@ benchmark_runtime() {
   FINETUNED_CHECKPOINT_DIR="$FINETUNED_CHECKPOINT_DIR" \
   PRUNED_CHECKPOINT_DIR="$PRUNED_CHECKPOINT_DIR" \
   FP16_DENSE_ONNX="$FP16_DENSE_ONNX" \
-  FP16_NVIDIA24_ONNX="$FP16_NVIDIA24_ONNX" \
+  FP16_PRUNED_ONNX="$FP16_PRUNED_ONNX" \
+  INT8_DENSE_ONNX="$INT8_DENSE_ONNX" \
+  INT8_PRUNED_ONNX="$INT8_PRUNED_ONNX" \
   BENCHMARK_JSON="$BENCHMARK_JSON" \
   LATENCY_SEQ_LENGTHS="$LATENCY_SEQ_LENGTHS" \
   LATENCY_BATCH_SIZE="$LATENCY_BATCH_SIZE" \
@@ -911,6 +1033,8 @@ benchmark_runtime() {
   TRUST_REMOTE_CODE="$TRUST_REMOTE_CODE" \
   PYTORCH_DEVICE="$PYTORCH_DEVICE" \
   FP16_ONNX_PROVIDER="$FP16_ONNX_PROVIDER" \
+  INT8_ONNX_PROVIDER="$INT8_ONNX_PROVIDER" \
+  RUN_INT8="$RUN_INT8" \
   RUN_TENSORRT="$RUN_TENSORRT" \
   TENSORRT_ONNX_PROVIDER="$TENSORRT_ONNX_PROVIDER" \
   TENSORRT_SPARSITY_ENABLE="$TENSORRT_SPARSITY_ENABLE" \
@@ -1139,8 +1263,11 @@ num_beams = int(os.environ["LATENCY_NUM_BEAMS"])
 dense_checkpoint = Path(os.environ["FINETUNED_CHECKPOINT_DIR"]).expanduser()
 pruned_checkpoint = Path(os.environ["PRUNED_CHECKPOINT_DIR"]).expanduser()
 dense_onnx = Path(os.environ["FP16_DENSE_ONNX"]).expanduser()
-pruned_onnx = Path(os.environ["FP16_NVIDIA24_ONNX"]).expanduser()
+pruned_onnx = Path(os.environ["FP16_PRUNED_ONNX"]).expanduser()
+int8_dense_onnx = Path(os.environ["INT8_DENSE_ONNX"]).expanduser()
+int8_pruned_onnx = Path(os.environ["INT8_PRUNED_ONNX"]).expanduser()
 trt_cache_root = Path(os.environ["TENSORRT_ENGINE_CACHE_ROOT"]).expanduser()
+run_int8 = env_bool("RUN_INT8", True)
 run_tensorrt = env_bool("RUN_TENSORRT", False)
 trt_sparse_enabled = env_bool("TENSORRT_SPARSITY_ENABLE", True)
 trt_cache_suffix = "sparse" if trt_sparse_enabled else "dense_tactics"
@@ -1150,15 +1277,17 @@ variants = [
         "model_variant": "dense",
         "runtime": "pytorch",
         "runtime_label": "PyTorch FP16",
+        "precision": "fp16",
         "source": dense_checkpoint,
         "tokenizer_fallback": None,
         "provider": None,
         "cache_dir": None,
     },
     {
-        "model_variant": "nvidia24",
+        "model_variant": "pruned",
         "runtime": "pytorch",
         "runtime_label": "PyTorch FP16",
+        "precision": "fp16",
         "source": pruned_checkpoint,
         "tokenizer_fallback": None,
         "provider": None,
@@ -1168,21 +1297,48 @@ variants = [
         "model_variant": "dense",
         "runtime": "onnx",
         "runtime_label": "ONNX FP16",
+        "precision": "fp16",
         "source": dense_onnx,
         "tokenizer_fallback": dense_checkpoint,
         "provider": os.environ["FP16_ONNX_PROVIDER"],
         "cache_dir": None,
     },
     {
-        "model_variant": "nvidia24",
+        "model_variant": "pruned",
         "runtime": "onnx",
         "runtime_label": "ONNX FP16",
+        "precision": "fp16",
         "source": pruned_onnx,
         "tokenizer_fallback": pruned_checkpoint,
         "provider": os.environ["FP16_ONNX_PROVIDER"],
         "cache_dir": None,
     },
 ]
+if run_int8:
+    variants.extend(
+        [
+            {
+                "model_variant": "dense",
+                "runtime": "onnx",
+                "runtime_label": "ONNX INT8",
+                "precision": "int8",
+                "source": int8_dense_onnx,
+                "tokenizer_fallback": dense_checkpoint,
+                "provider": os.environ["INT8_ONNX_PROVIDER"],
+                "cache_dir": None,
+            },
+            {
+                "model_variant": "pruned",
+                "runtime": "onnx",
+                "runtime_label": "ONNX INT8",
+                "precision": "int8",
+                "source": int8_pruned_onnx,
+                "tokenizer_fallback": pruned_checkpoint,
+                "provider": os.environ["INT8_ONNX_PROVIDER"],
+                "cache_dir": None,
+            },
+        ]
+    )
 if run_tensorrt:
     variants.extend(
         [
@@ -1190,19 +1346,21 @@ if run_tensorrt:
                 "model_variant": "dense",
                 "runtime": "tensorrt",
                 "runtime_label": "TensorRT FP16",
+                "precision": "fp16",
                 "source": dense_onnx,
                 "tokenizer_fallback": dense_checkpoint,
                 "provider": os.environ["TENSORRT_ONNX_PROVIDER"],
                 "cache_dir": trt_cache_root / "dense" / trt_cache_suffix,
             },
             {
-                "model_variant": "nvidia24",
+                "model_variant": "pruned",
                 "runtime": "tensorrt",
                 "runtime_label": "TensorRT FP16",
+                "precision": "fp16",
                 "source": pruned_onnx,
                 "tokenizer_fallback": pruned_checkpoint,
                 "provider": os.environ["TENSORRT_ONNX_PROVIDER"],
-                "cache_dir": trt_cache_root / "nvidia24" / trt_cache_suffix,
+                "cache_dir": trt_cache_root / "pruned" / trt_cache_suffix,
             },
         ]
     )
@@ -1252,7 +1410,7 @@ for spec in variants:
                 "model_variant": spec["model_variant"],
                 "runtime": spec["runtime"],
                 "runtime_label": spec["runtime_label"],
-                "precision": "fp16",
+                "precision": spec["precision"],
                 "batch_size": batch_size,
                 "input_length": seq_len,
                 "queries": len(latencies_ms),
@@ -1285,7 +1443,7 @@ payload = {
     "benchmark_json": os.environ["BENCHMARK_JSON"],
     "metric_contract": {
         "runtime": "PyTorch FP16 and ONNX FP16 by default; optional TensorRT FP16 with RUN_TENSORRT=1",
-        "precision": "FP16 deployment benchmark; INT8 artifacts are exported/evaluated separately",
+        "precision": "FP16 and INT8 ONNX deployment benchmark rows; optional TensorRT FP16 with RUN_TENSORRT=1",
         "latency": "mean latency, ms/query, batch size 1",
         "p95_latency": "95th percentile latency, ms/query",
         "throughput": "queries/second",
@@ -1310,6 +1468,9 @@ write_final_report() {
   FINETUNED_CHECKPOINT_DIR="$FINETUNED_CHECKPOINT_DIR" \
   PRUNED_CHECKPOINT_DIR="$PRUNED_CHECKPOINT_DIR" \
   PRUNED_SUMMARY_JSON="$PRUNED_SUMMARY_JSON" \
+  PRUNED_PRETTY_LABEL="$PRUNED_PRETTY_LABEL" \
+  PRUNE_METHOD="$PRUNE_METHOD" \
+  SPARSITY="$SPARSITY" \
   RUNTIME_BENCHMARK_JSON="$RUNTIME_BENCHMARK_JSON" \
   REPORT_ROOT="$REPORT_ROOT" \
   RUN_INT8="$RUN_INT8" \
@@ -1344,20 +1505,21 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 
 report_root = Path(os.environ["REPORT_ROOT"])
+pruned_label = os.environ["PRUNED_PRETTY_LABEL"]
 accuracy_specs = [
     ("pytorch_fp16_dense", "PyTorch FP16 dense", report_root / "pytorch_fp16_dense_accuracy_report.json"),
-    ("pytorch_fp16_nvidia24", "PyTorch FP16 2:4 pruned", report_root / "pytorch_fp16_nvidia24_accuracy_report.json"),
+    ("pytorch_fp16_pruned", f"PyTorch FP16 {pruned_label}", report_root / "pytorch_fp16_pruned_accuracy_report.json"),
     ("onnx_fp16_dense", "ONNX FP16 dense", report_root / "onnx_fp16_dense_accuracy_report.json"),
-    ("onnx_fp16_nvidia24", "ONNX FP16 2:4 pruned", report_root / "onnx_fp16_nvidia24_accuracy_report.json"),
+    ("onnx_fp16_pruned", f"ONNX FP16 {pruned_label}", report_root / "onnx_fp16_pruned_accuracy_report.json"),
 ]
 if env_bool("RUN_TENSORRT", False):
     accuracy_specs.extend(
         [
             ("tensorrt_fp16_dense", "TensorRT FP16 dense", report_root / "tensorrt_fp16_dense_accuracy_report.json"),
             (
-                "tensorrt_fp16_nvidia24",
-                "TensorRT FP16 2:4 pruned",
-                report_root / "tensorrt_fp16_nvidia24_accuracy_report.json",
+                "tensorrt_fp16_pruned",
+                f"TensorRT FP16 {pruned_label}",
+                report_root / "tensorrt_fp16_pruned_accuracy_report.json",
             ),
         ]
     )
@@ -1365,7 +1527,7 @@ if env_bool("RUN_INT8", True):
     accuracy_specs.extend(
         [
             ("onnx_int8_dense", "ONNX INT8 dense", report_root / "onnx_int8_dense_accuracy_report.json"),
-            ("onnx_int8_nvidia24", "ONNX INT8 2:4 pruned", report_root / "onnx_int8_nvidia24_accuracy_report.json"),
+            ("onnx_int8_pruned", f"ONNX INT8 {pruned_label}", report_root / "onnx_int8_pruned_accuracy_report.json"),
         ]
     )
 
@@ -1401,6 +1563,47 @@ for key, label, path in accuracy_specs:
             }
         )
 
+baseline_by_dataset = {
+    row["dataset"]: row
+    for row in accuracy_table
+    if row["variant"] == "pytorch_fp16_dense"
+}
+accuracy_delta_table: list[dict[str, Any]] = []
+for row in accuracy_table:
+    baseline = baseline_by_dataset.get(row["dataset"])
+    if baseline is None:
+        continue
+    accuracy_delta_table.append(
+        {
+            **row,
+            "baseline_variant": "pytorch_fp16_dense",
+            "delta_em1_percent": row["em1_percent"] - baseline["em1_percent"],
+            "delta_em5_percent": row["em5_percent"] - baseline["em5_percent"],
+            "retention_em1_percent": (
+                row["em1_percent"] / baseline["em1_percent"] * 100.0
+                if baseline["em1_percent"]
+                else None
+            ),
+            "retention_em5_percent": (
+                row["em5_percent"] / baseline["em5_percent"] * 100.0
+                if baseline["em5_percent"]
+                else None
+            ),
+        }
+    )
+
+model_size_table = [
+    {
+        "variant": key,
+        "label": report["label"],
+        "runtime": report["runtime"],
+        "precision": report["precision"],
+        "model_or_engine_size_mb": report["model_or_engine_size_mb"],
+        "source_path": report["source_path"],
+    }
+    for key, report in accuracy_reports.items()
+]
+
 runtime_report = maybe_read(Path(os.environ["RUNTIME_BENCHMARK_JSON"]))
 output_json = Path(os.environ["FINAL_JSON"])
 output_json.parent.mkdir(parents=True, exist_ok=True)
@@ -1410,10 +1613,13 @@ payload = {
     "fine_tuned_checkpoint_path": os.environ["FINETUNED_CHECKPOINT_DIR"],
     "pruned_checkpoint_path": os.environ["PRUNED_CHECKPOINT_DIR"],
     "pruning_summary_json": os.environ["PRUNED_SUMMARY_JSON"],
+    "pruning_method": os.environ["PRUNE_METHOD"],
+    "requested_sparsity": float(os.environ["SPARSITY"]),
+    "pruned_variant_label": pruned_label,
     "output_root": os.environ["OUTPUT_ROOT"],
     "metric_contract": {
-        "runtime": "PyTorch FP16 and ONNX FP16 by default; optional TensorRT FP16 with RUN_TENSORRT=1",
-        "precision": "FP16 primary deployment comparison; ONNX INT8 exported/evaluated as optional follow-up artifact",
+        "runtime": "PyTorch FP16, ONNX FP16, and ONNX INT8 by default; optional TensorRT FP16 with RUN_TENSORRT=1",
+        "precision": "FP16 and INT8 comparison after 50% gradient pruning; this is a sparse quantized baseline for ASIC comparison, not a full edge deployment claim",
         "latency": "mean latency, ms/query, batch size 1",
         "p95_latency": "95th percentile latency, ms/query",
         "throughput": "queries/second",
@@ -1424,6 +1630,8 @@ payload = {
     },
     "accuracy_reports": accuracy_reports,
     "accuracy_table": accuracy_table,
+    "accuracy_delta_table": accuracy_delta_table,
+    "model_size_table": model_size_table,
     "runtime_benchmark": runtime_report,
     "pruning_summary": maybe_read(Path(os.environ["PRUNED_SUMMARY_JSON"])),
 }
@@ -1447,20 +1655,27 @@ echo "Deployment benchmark seq lengths: $LATENCY_SEQ_LENGTHS, batch=1"
 
 run_finetune
 repair_checkpoint_assets "$FINETUNED_CHECKPOINT_DIR" "$SOURCE_ASSET_DIR" "fine-tuned checkpoint"
-create_nvidia24_pruned_checkpoint
-repair_checkpoint_assets "$PRUNED_CHECKPOINT_DIR" "$FINETUNED_CHECKPOINT_DIR" "NVIDIA 2:4 pruned checkpoint"
+create_pruned_checkpoint
+repair_checkpoint_assets "$PRUNED_CHECKPOINT_DIR" "$FINETUNED_CHECKPOINT_DIR" "${PRUNED_PRETTY_LABEL} checkpoint"
 
 export_onnx "$FINETUNED_CHECKPOINT_DIR" "$FP16_DENSE_ONNX" "fine-tuned dense FP16" "fp16" "$EXPORT_DEVICE"
-export_onnx "$PRUNED_CHECKPOINT_DIR" "$FP16_NVIDIA24_ONNX" "fine-tuned NVIDIA 2:4 FP16" "fp16" "$EXPORT_DEVICE"
+export_onnx "$PRUNED_CHECKPOINT_DIR" "$FP16_PRUNED_ONNX" "fine-tuned ${PRUNED_PRETTY_LABEL} FP16" "fp16" "$EXPORT_DEVICE"
 
 if truthy "$RUN_INT8"; then
   export_onnx "$FINETUNED_CHECKPOINT_DIR" "$FP32_DENSE_ONNX" "fine-tuned dense FP32 INT8 source" "fp32" "$FP32_EXPORT_DEVICE"
-  export_onnx "$PRUNED_CHECKPOINT_DIR" "$FP32_NVIDIA24_ONNX" "fine-tuned NVIDIA 2:4 FP32 INT8 source" "fp32" "$FP32_EXPORT_DEVICE"
+  export_onnx "$PRUNED_CHECKPOINT_DIR" "$FP32_PRUNED_ONNX" "fine-tuned ${PRUNED_PRETTY_LABEL} FP32 INT8 source" "fp32" "$FP32_EXPORT_DEVICE"
   quantize_onnx_dynamic_int8 "$FP32_DENSE_ONNX" "$INT8_DENSE_ONNX" "fine-tuned dense"
-  quantize_onnx_dynamic_int8 "$FP32_NVIDIA24_ONNX" "$INT8_NVIDIA24_ONNX" "fine-tuned NVIDIA 2:4"
+  quantize_onnx_dynamic_int8 "$FP32_PRUNED_ONNX" "$INT8_PRUNED_ONNX" "fine-tuned ${PRUNED_PRETTY_LABEL}"
 fi
 
-evaluate_accuracy_variant \
+prepare_accuracy_gpus
+if truthy "$RUN_ACCURACY_PARALLEL" && [[ "${#accuracy_gpu_ids[@]}" -gt 1 ]]; then
+  echo "Accuracy evals will run in parallel across GPUs: ${accuracy_gpu_ids[*]}"
+else
+  echo "Accuracy evals will run sequentially."
+fi
+
+run_accuracy_eval \
   "pytorch_fp16_dense" \
   "PyTorch FP16 dense" \
   "pytorch" \
@@ -1471,18 +1686,18 @@ evaluate_accuracy_variant \
   "dense" \
   "$REPORT_ROOT/pytorch_fp16_dense_accuracy_report.json"
 
-evaluate_accuracy_variant \
-  "pytorch_fp16_nvidia24" \
-  "PyTorch FP16 2:4 pruned" \
+run_accuracy_eval \
+  "pytorch_fp16_pruned" \
+  "PyTorch FP16 ${PRUNED_PRETTY_LABEL}" \
   "pytorch" \
   "$PRUNED_CHECKPOINT_DIR" \
   "$PRUNED_CHECKPOINT_DIR" \
   "" \
   "fp16" \
-  "nvidia24" \
-  "$REPORT_ROOT/pytorch_fp16_nvidia24_accuracy_report.json"
+  "pruned" \
+  "$REPORT_ROOT/pytorch_fp16_pruned_accuracy_report.json"
 
-evaluate_accuracy_variant \
+run_accuracy_eval \
   "onnx_fp16_dense" \
   "ONNX FP16 dense" \
   "onnx" \
@@ -1493,19 +1708,19 @@ evaluate_accuracy_variant \
   "dense" \
   "$REPORT_ROOT/onnx_fp16_dense_accuracy_report.json"
 
-evaluate_accuracy_variant \
-  "onnx_fp16_nvidia24" \
-  "ONNX FP16 2:4 pruned" \
+run_accuracy_eval \
+  "onnx_fp16_pruned" \
+  "ONNX FP16 ${PRUNED_PRETTY_LABEL}" \
   "onnx" \
-  "$FP16_NVIDIA24_ONNX" \
+  "$FP16_PRUNED_ONNX" \
   "$PRUNED_CHECKPOINT_DIR" \
   "$FP16_ONNX_PROVIDER" \
   "fp16" \
-  "nvidia24" \
-  "$REPORT_ROOT/onnx_fp16_nvidia24_accuracy_report.json"
+  "pruned" \
+  "$REPORT_ROOT/onnx_fp16_pruned_accuracy_report.json"
 
 if truthy "$RUN_TENSORRT"; then
-  evaluate_accuracy_variant \
+  run_accuracy_eval \
     "tensorrt_fp16_dense" \
     "TensorRT FP16 dense" \
     "tensorrt" \
@@ -1516,20 +1731,20 @@ if truthy "$RUN_TENSORRT"; then
     "dense" \
     "$REPORT_ROOT/tensorrt_fp16_dense_accuracy_report.json"
 
-  evaluate_accuracy_variant \
-    "tensorrt_fp16_nvidia24" \
-    "TensorRT FP16 2:4 pruned" \
+  run_accuracy_eval \
+    "tensorrt_fp16_pruned" \
+    "TensorRT FP16 ${PRUNED_PRETTY_LABEL}" \
     "tensorrt" \
-    "$FP16_NVIDIA24_ONNX" \
+    "$FP16_PRUNED_ONNX" \
     "$PRUNED_CHECKPOINT_DIR" \
     "$TENSORRT_ONNX_PROVIDER" \
     "fp16" \
-    "nvidia24" \
-    "$REPORT_ROOT/tensorrt_fp16_nvidia24_accuracy_report.json"
+    "pruned" \
+    "$REPORT_ROOT/tensorrt_fp16_pruned_accuracy_report.json"
 fi
 
 if truthy "$RUN_INT8"; then
-  evaluate_accuracy_variant \
+  run_accuracy_eval \
     "onnx_int8_dense" \
     "ONNX INT8 dense" \
     "onnx" \
@@ -1540,18 +1755,19 @@ if truthy "$RUN_INT8"; then
     "dense" \
     "$REPORT_ROOT/onnx_int8_dense_accuracy_report.json"
 
-  evaluate_accuracy_variant \
-    "onnx_int8_nvidia24" \
-    "ONNX INT8 2:4 pruned" \
+  run_accuracy_eval \
+    "onnx_int8_pruned" \
+    "ONNX INT8 ${PRUNED_PRETTY_LABEL}" \
     "onnx" \
-    "$INT8_NVIDIA24_ONNX" \
+    "$INT8_PRUNED_ONNX" \
     "$PRUNED_CHECKPOINT_DIR" \
     "$INT8_ONNX_PROVIDER" \
     "int8" \
-    "nvidia24" \
-    "$REPORT_ROOT/onnx_int8_nvidia24_accuracy_report.json"
+    "pruned" \
+    "$REPORT_ROOT/onnx_int8_pruned_accuracy_report.json"
 fi
 
+wait_accuracy_evals
 benchmark_runtime
 write_final_report
 
