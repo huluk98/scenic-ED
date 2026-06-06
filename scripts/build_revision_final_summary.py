@@ -209,6 +209,8 @@ def summarize_legacy_json(
             if not isinstance(method_info, dict):
                 continue
             individual_report = read_json_if_exists(method_info.get("report_json", ""))
+            pruning = method_info.get("pruning", {})
+            pruning = pruning if isinstance(pruning, dict) else {}
             original = phase_metrics(method_info, "original_before_prune")
             pruned = phase_metrics(method_info, "pruned_after_50_percent")
             original["benchmark_by_difficulty"] = difficulty_breakdown(
@@ -223,9 +225,12 @@ def summarize_legacy_json(
                 {
                     "method": method,
                     "target_sparsity": target_sparsity,
+                    "targeted_linear_sparsity_actual": pruning.get("targeted_sparsity"),
+                    "whole_model_sparsity_actual": pruning.get("full_model_sparsity_after"),
+                    "effective_weight_sparsity": pruning.get("effective_weight_sparsity"),
                     "report_json": method_info.get("report_json"),
                     "pruned_model_path": method_info.get("pruned_model_path"),
-                    "pruning": method_info.get("pruning", {}),
+                    "pruning": pruning,
                     "original_before_prune": original,
                     "pruned_after": pruned,
                 }

@@ -92,7 +92,16 @@ Run the complete revised experiment suite from the original Hugging Face model w
 bash scripts/run_full_revision_experiments.sh
 ```
 
-The default base model is `charent/ChatLM-mini-Chinese`. The launcher fine-tunes both regular SFT and contrastive SFT for five epochs, runs the existing one-shot 50% pruning/eval suite, runs the new 0/30/50 sparsity matrix for both checkpoints, and then runs ONNX FP32/FP16/INT8 precision benchmarks for both checkpoints.
+The default base model is `charent/ChatLM-mini-Chinese`. The launcher fine-tunes both regular SFT and contrastive SFT for five epochs, runs the existing one-shot 50% pruning/eval suite, runs the added one-shot 30% pruning/eval suite, and runs the new 0/30/50 sparsity matrix for both checkpoints.
+
+By default the full launcher is now pruning-focused and skips ONNX (`RUN_ONNX=0`). The SFT and legacy pruning/eval steps use `NPROC_PER_NODE`/`torchrun`, and the added linear/progressive pruning jobs are split across visible GPUs by default with `RUN_SPARSITY_PARALLEL=1`. On an 8x H20 box, run:
+
+```bash
+NPROC_PER_NODE=8 SPARSITY_GPU_IDS=0,1,2,3,4,5,6,7 \
+bash scripts/run_full_revision_experiments.sh
+```
+
+Set `RUN_ONNX=1` only when ONNX precision/runtime tables are needed.
 
 If a full run has already completed and its 0%/50% results look good, add only the 30% follow-up without retraining or rerunning the whole matrix:
 

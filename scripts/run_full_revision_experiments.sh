@@ -16,8 +16,9 @@ This one launcher:
   4. Runs the added one-shot 30% pruning/eval suite for both checkpoints.
   5. Runs the new 0/30/50 linear sparsity matrix for both checkpoints:
        dense_0, oneshot_30, oneshot_50, progressive_30, progressive_50
-     Progressive methods default to one final recovery epoch total.
-  6. Runs ONNX FP32/FP16/INT8 precision benchmark tables for both checkpoints.
+     Progressive methods default to one final recovery epoch total, and these
+     added pruning jobs are split across the visible GPUs by default.
+  6. Optionally runs ONNX FP32/FP16/INT8 precision benchmark tables.
 
 Common overrides:
   REVISION_OUTPUT_ROOT=results/scenic_revision_full_run
@@ -28,7 +29,9 @@ Common overrides:
   RUN_LEGACY_PRUNE=1
   RUN_LEGACY_ONESHOT_30=1
   RUN_SPARSITY=1
-  RUN_ONNX=1
+  RUN_ONNX=0
+  RUN_SPARSITY_PARALLEL=1
+  SPARSITY_GPU_IDS="0,1,2,3,4,5,6,7"
   LEGACY_30_PRUNE_METHODS="magnitude wanda gradient"
   SPARSITY_LEVELS="0 0.3 0.5"
   SPARSITY_PRUNING_MODES="dense oneshot progressive"
@@ -81,11 +84,13 @@ IGNORE_SPACES="${IGNORE_SPACES:-1}"
 RUN_LEGACY_PRUNE="${RUN_LEGACY_PRUNE:-1}"
 RUN_LEGACY_ONESHOT_30="${RUN_LEGACY_ONESHOT_30:-1}"
 RUN_SPARSITY="${RUN_SPARSITY:-1}"
-RUN_ONNX="${RUN_ONNX:-1}"
+RUN_ONNX="${RUN_ONNX:-0}"
 LEGACY_30_PRUNE_METHODS="${LEGACY_30_PRUNE_METHODS:-magnitude wanda gradient}"
 
 SPARSITY_LEVELS="${SPARSITY_LEVELS:-0 0.3 0.5}"
 SPARSITY_PRUNING_MODES="${SPARSITY_PRUNING_MODES:-dense oneshot progressive}"
+RUN_SPARSITY_PARALLEL="${RUN_SPARSITY_PARALLEL:-1}"
+SPARSITY_GPU_IDS="${SPARSITY_GPU_IDS:-}"
 SPARSITY_RECOVERY_EPOCHS_PER_STAGE="${SPARSITY_RECOVERY_EPOCHS_PER_STAGE:-0}"
 SPARSITY_FINAL_RECOVERY_EPOCHS="${SPARSITY_FINAL_RECOVERY_EPOCHS:-1}"
 SPARSITY_NUM_BEAMS="${SPARSITY_NUM_BEAMS:-5}"
@@ -96,6 +101,36 @@ truthy() {
   case "${1:-0}" in
     1|true|TRUE|yes|YES|y|Y|on|ON) return 0 ;;
     *) return 1 ;;
+  esac
+}
+
+detect_gpu_ids() {
+  if [[ -n "$SPARSITY_GPU_IDS" ]]; then
+    printf '%s\n' "$SPARSITY_GPU_IDS"
+    return
+  fi
+  if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    printf '%s\n' "$CUDA_VISIBLE_DEVICES"
+    return
+  fi
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    local count
+    count="$(nvidia-smi -L | wc -l | tr -d ' ')"
+    if [[ "$count" != "0" ]]; then
+      seq -s, 0 $((count - 1))
+      return
+    fi
+  fi
+  printf '\n'
+}
+
+sparsity_tag() {
+  local raw="$1"
+  case "$raw" in
+    0|0.0|0.00) printf '0' ;;
+    0.3|.3|0.30) printf '30' ;;
+    0.5|.5|0.50) printf '50' ;;
+    *) printf '%s' "$raw" | tr -c 'A-Za-z0-9_.-' '_' | sed 's/_$//' ;;
   esac
 }
 
@@ -196,6 +231,22 @@ run_sparsity_matrix() {
   local sparsity_levels=( $SPARSITY_LEVELS )
   # shellcheck disable=SC2206
   local pruning_modes=( $SPARSITY_PRUNING_MODES )
+
+  if truthy "$RUN_SPARSITY_PARALLEL"; then
+    local gpu_csv
+    gpu_csv="$(detect_gpu_ids)"
+    gpu_csv="${gpu_csv// /,}"
+    local gpu_ids=()
+    if [[ -n "$gpu_csv" ]]; then
+      IFS=',' read -r -a gpu_ids <<< "$gpu_csv"
+    fi
+    if [[ "${#gpu_ids[@]}" -gt 1 ]]; then
+      run_sparsity_matrix_parallel "$label" "$checkpoint" "$train_json" "$output_dir" "${gpu_ids[@]}"
+      return
+    fi
+    echo "RUN_SPARSITY_PARALLEL=1 but fewer than two GPUs were detected; running ${label} sequentially."
+  fi
+
   "$PYTHON" scripts/run_sparsity_experiments.py \
     --experiment_name "scenic_${label}_linear_sparsity_0_30_50" \
     --model_family "$MODEL_FAMILY" \
@@ -214,6 +265,137 @@ run_sparsity_matrix() {
     --seed "$SEED" \
     --output_dir "$output_dir" \
     "${extra_args[@]}"
+}
+
+run_sparsity_condition() {
+  local label="$1"
+  local checkpoint="$2"
+  local train_json="$3"
+  local output_dir="$4"
+  local mode="$5"
+  local level="$6"
+  local gpu_id="${7:-}"
+  local tag
+  tag="$(sparsity_tag "$level")"
+  local job_dir="${output_dir}/jobs/${mode}_${tag}"
+  local extra_args=()
+  if [[ -n "${MAX_TRAIN_EXAMPLES:-}" ]]; then
+    extra_args+=(--max_train_examples "$MAX_TRAIN_EXAMPLES")
+  fi
+  if [[ -n "${MAX_BENCHMARK_EXAMPLES:-}" ]]; then
+    extra_args+=(--max_benchmark_examples "$MAX_BENCHMARK_EXAMPLES")
+  fi
+
+  mkdir -p "$job_dir"
+  echo "Starting ${label} ${mode}_${tag} on GPU ${gpu_id:-auto}; log: ${job_dir}/run.log"
+  if [[ -n "$gpu_id" ]]; then
+    CUDA_VISIBLE_DEVICES="$gpu_id" "$PYTHON" scripts/run_sparsity_experiments.py \
+      --experiment_name "scenic_${label}_linear_sparsity_${mode}_${tag}" \
+      --model_family "$MODEL_FAMILY" \
+      --model_checkpoint "$checkpoint" \
+      --benchmark_path "$BENCHMARK_JSON" \
+      --train_path "$train_json" \
+      --sparsity_levels "$level" \
+      --pruning_modes "$mode" \
+      --prune_scope linear_weights \
+      --prune_method magnitude \
+      --recovery_epochs_per_stage "$SPARSITY_RECOVERY_EPOCHS_PER_STAGE" \
+      --final_recovery_epochs "$SPARSITY_FINAL_RECOVERY_EPOCHS" \
+      --num_beams "$SPARSITY_NUM_BEAMS" \
+      --num_return_sequences "$SPARSITY_NUM_RETURN_SEQUENCES" \
+      --max_new_tokens "$SPARSITY_MAX_NEW_TOKENS" \
+      --seed "$SEED" \
+      --output_dir "$job_dir" \
+      "${extra_args[@]}" \
+      > "${job_dir}/run.log" 2>&1
+  else
+    "$PYTHON" scripts/run_sparsity_experiments.py \
+      --experiment_name "scenic_${label}_linear_sparsity_${mode}_${tag}" \
+      --model_family "$MODEL_FAMILY" \
+      --model_checkpoint "$checkpoint" \
+      --benchmark_path "$BENCHMARK_JSON" \
+      --train_path "$train_json" \
+      --sparsity_levels "$level" \
+      --pruning_modes "$mode" \
+      --prune_scope linear_weights \
+      --prune_method magnitude \
+      --recovery_epochs_per_stage "$SPARSITY_RECOVERY_EPOCHS_PER_STAGE" \
+      --final_recovery_epochs "$SPARSITY_FINAL_RECOVERY_EPOCHS" \
+      --num_beams "$SPARSITY_NUM_BEAMS" \
+      --num_return_sequences "$SPARSITY_NUM_RETURN_SEQUENCES" \
+      --max_new_tokens "$SPARSITY_MAX_NEW_TOKENS" \
+      --seed "$SEED" \
+      --output_dir "$job_dir" \
+      "${extra_args[@]}" \
+      > "${job_dir}/run.log" 2>&1
+  fi
+}
+
+run_sparsity_matrix_parallel() {
+  local label="$1"
+  local checkpoint="$2"
+  local train_json="$3"
+  local output_dir="$4"
+  shift 4
+  local gpu_ids=( "$@" )
+  local job_specs=()
+  # shellcheck disable=SC2206
+  local sparsity_levels=( $SPARSITY_LEVELS )
+  # shellcheck disable=SC2206
+  local pruning_modes=( $SPARSITY_PRUNING_MODES )
+  local mode
+  for mode in "${pruning_modes[@]}"; do
+    if [[ "$mode" == "dense" ]]; then
+      job_specs+=("dense:0")
+      continue
+    fi
+    local level
+    for level in "${sparsity_levels[@]}"; do
+      if [[ "$level" == "0" || "$level" == "0.0" || "$level" == "0.00" ]]; then
+        continue
+      fi
+      job_specs+=("${mode}:${level}")
+    done
+  done
+
+  if [[ "${#job_specs[@]}" -eq 0 ]]; then
+    echo "No sparsity jobs selected for ${label}." >&2
+    exit 2
+  fi
+
+  local total_jobs="${#job_specs[@]}"
+  local gpu_count="${#gpu_ids[@]}"
+  local index=0
+  while [[ "$index" -lt "$total_jobs" ]]; do
+    local pids=()
+    local batch=0
+    while [[ "$batch" -lt "$gpu_count" && "$index" -lt "$total_jobs" ]]; do
+      local spec="${job_specs[$index]}"
+      local job_mode="${spec%%:*}"
+      local job_level="${spec#*:}"
+      local gpu_id="${gpu_ids[$batch]}"
+      run_sparsity_condition "$label" "$checkpoint" "$train_json" "$output_dir" "$job_mode" "$job_level" "$gpu_id" &
+      pids+=( "$!" )
+      index=$((index + 1))
+      batch=$((batch + 1))
+    done
+
+    local pid
+    local failed=0
+    for pid in "${pids[@]}"; do
+      if ! wait "$pid"; then
+        failed=1
+      fi
+    done
+    if [[ "$failed" -ne 0 ]]; then
+      echo "At least one ${label} sparsity job failed. Check logs under ${output_dir}/jobs." >&2
+      exit 1
+    fi
+  done
+
+  "$PYTHON" scripts/aggregate_sparsity_job_summaries.py \
+    --job-root "${output_dir}/jobs" \
+    --output-dir "$output_dir"
 }
 
 if truthy "$RUN_SPARSITY"; then
@@ -270,6 +452,7 @@ created_at=${RUN_ID}
 base_model=${BASE_MODEL}
 output_root=${REVISION_OUTPUT_ROOT}
 final_revision_summary=${REVISION_SUMMARY_JSON}
+run_onnx=${RUN_ONNX}
 legacy_report=${LEGACY_OUTPUT_ROOT}/all_sft_contrastive_pruning_em_report.json
 legacy_sparsity_check=${LEGACY_OUTPUT_ROOT}/sparsity_check.json
 legacy_30_report=${LEGACY_30_OUTPUT_ROOT}/all_sft_contrastive_pruning_em_report_30.json
