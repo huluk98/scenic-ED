@@ -64,6 +64,7 @@ CONTRASTIVE_OUTPUT_DIR="${CONTRASTIVE_OUTPUT_DIR:-${LEGACY_OUTPUT_ROOT}/contrast
 LEGACY_30_OUTPUT_ROOT="${LEGACY_30_OUTPUT_ROOT:-${REVISION_OUTPUT_ROOT}/legacy_oneshot_30}"
 SPARSITY_OUTPUT_ROOT="${SPARSITY_OUTPUT_ROOT:-${REVISION_OUTPUT_ROOT}/linear_sparsity_0_30_50}"
 ONNX_OUTPUT_ROOT="${ONNX_OUTPUT_ROOT:-${REVISION_OUTPUT_ROOT}/onnx_precision}"
+REVISION_SUMMARY_JSON="${REVISION_SUMMARY_JSON:-${REVISION_OUTPUT_ROOT}/final_revision_summary.json}"
 FINAL_MANIFEST="${FINAL_MANIFEST:-${REVISION_OUTPUT_ROOT}/full_revision_manifest.txt}"
 
 PYTHON="${PYTHON:-python}"
@@ -247,11 +248,28 @@ else
   echo "RUN_ONNX=0; skipping ONNX precision benchmarks."
 fi
 
+"$PYTHON" scripts/build_revision_final_summary.py \
+  --output-json "$REVISION_SUMMARY_JSON" \
+  --base-model "$BASE_MODEL" \
+  --epochs "$EPOCHS" \
+  --benchmark-json "$BENCHMARK_JSON" \
+  --regular-checkpoint "$REGULAR_OUTPUT_DIR" \
+  --contrastive-checkpoint "$CONTRASTIVE_OUTPUT_DIR" \
+  --regular-train-json "$REGULAR_TRAIN_JSON" \
+  --contrastive-train-json "$CONTRASTIVE_TRAIN_JSON" \
+  --legacy-50-json "${LEGACY_OUTPUT_ROOT}/all_sft_contrastive_pruning_em_report.json" \
+  --legacy-30-json "${LEGACY_30_OUTPUT_ROOT}/all_sft_contrastive_pruning_em_report_30.json" \
+  --regular-sparsity-summary-csv "${SPARSITY_OUTPUT_ROOT}/regular_sft/summary_metrics.csv" \
+  --contrastive-sparsity-summary-csv "${SPARSITY_OUTPUT_ROOT}/contrastive_sft/summary_metrics.csv" \
+  --onnx-regular-table "${ONNX_OUTPUT_ROOT}/regular_sft/reports/onnx_precision_benchmark/onnx_precision_benchmark.md" \
+  --onnx-contrastive-table "${ONNX_OUTPUT_ROOT}/contrastive_sft/reports/onnx_precision_benchmark/onnx_precision_benchmark.md"
+
 cat > "$FINAL_MANIFEST" <<EOF
 SCENIC full revision run
 created_at=${RUN_ID}
 base_model=${BASE_MODEL}
 output_root=${REVISION_OUTPUT_ROOT}
+final_revision_summary=${REVISION_SUMMARY_JSON}
 legacy_report=${LEGACY_OUTPUT_ROOT}/all_sft_contrastive_pruning_em_report.json
 legacy_sparsity_check=${LEGACY_OUTPUT_ROOT}/sparsity_check.json
 legacy_30_report=${LEGACY_30_OUTPUT_ROOT}/all_sft_contrastive_pruning_em_report_30.json

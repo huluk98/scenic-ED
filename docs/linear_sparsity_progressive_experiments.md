@@ -135,6 +135,7 @@ Run one command per model family/checkpoint. Use `--model_family encoder_only`, 
 
 The runner writes:
 
+- `final_revision_summary.json` from the full launcher, consolidating regular SFT and contrastive SFT outputs, the 7 original pruning-method outputs per model, the 2 added progressive outputs per model, training/benchmark EM@1/EM@5 for legacy pruning reports, and benchmark easy/medium/hard breakdowns when difficulty labels are available
 - `predictions_{model_family}_{pruning_mode}_{sparsity}_{seed}.csv`
 - `summary_metrics.csv`
 - `paper_table_sparsity_difficulty.csv`
