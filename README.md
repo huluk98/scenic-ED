@@ -37,6 +37,14 @@ python -m pip install --extra-index-url https://pypi.nvidia.com "numpy>=1.26" "o
 
 The native TensorRT benchmark also needs NVIDIA `trtexec` on `PATH`; check it with `trtexec --version`. If `trtexec` is missing, install TensorRT from NVIDIA packages or use an NVIDIA TensorRT container before running `scripts/run_h20_encoder_decoder_sft_prune_trt24.sh`.
 
+The H20 launcher also exports calibrated static QDQ INT8 ONNX artifacts from real calibration examples, not random ranges:
+
+- `onnx/dense_sft_int8_qdq/model.onnx`
+- `onnx/nvidia_2_4_sft_int8_qdq/model.onnx`
+- `reports/int8_status.json`
+
+These files are enough to test ONNX Runtime GPU provider behavior for INT8. Treat NVIDIA 2:4 sparse hardware acceleration as proven only when the backend exposes evidence that sparse kernels or sparse tactics were actually used.
+
 If your base model is a Hugging Face repo id, pass it directly. The H20 launcher downloads that repo into `<output_dir>/base_model` first, then trains from the local snapshot with `trust_remote_code=True`, so the original Hugging Face `modeling.py` and related custom-code files are used and preserved for later pruning/export steps:
 
 ```bash

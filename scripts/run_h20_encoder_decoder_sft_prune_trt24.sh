@@ -26,6 +26,9 @@ Useful env overrides:
   LOCAL_FILES_ONLY    default: auto; local dirs stay offline, HF ids are downloaded first
   LOCAL_BASE_MODEL_DIR default: <output_dir>/base_model for downloaded HF snapshots
   HF_TOKEN            optional token for private Hugging Face models
+  INT8_CALIBRATION_JSON default: train_jsonl
+  INT8_CALIBRATION_SAMPLES default: 200
+  SKIP_INT8           default: 0
 
 Example:
   bash scripts/run_h20_encoder_decoder_sft_prune_trt24.sh \
@@ -70,6 +73,10 @@ TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-1}"
 LOCAL_FILES_ONLY="${LOCAL_FILES_ONLY:-auto}"
 FORCE_EXPORT="${FORCE_EXPORT:-0}"
 FORCE_TRT="${FORCE_TRT:-0}"
+FORCE_INT8="${FORCE_INT8:-0}"
+SKIP_INT8="${SKIP_INT8:-0}"
+INT8_CALIBRATION_JSON="${INT8_CALIBRATION_JSON:-$TRAIN_JSONL}"
+INT8_CALIBRATION_SAMPLES="${INT8_CALIBRATION_SAMPLES:-200}"
 SKIP_TRAIN="${SKIP_TRAIN:-0}"
 SKIP_PRUNE_EVAL="${SKIP_PRUNE_EVAL:-0}"
 SKIP_ONNX="${SKIP_ONNX:-0}"
@@ -245,6 +252,14 @@ DENSE_ONNX_DIR="${ONNX_DIR}/dense_sft_fp16"
 PRUNED_ONNX_DIR="${ONNX_DIR}/nvidia_2_4_sft_fp16"
 DENSE_ONNX="${DENSE_ONNX_DIR}/model.onnx"
 PRUNED_ONNX="${PRUNED_ONNX_DIR}/model.onnx"
+DENSE_FP32_ONNX_DIR="${ONNX_DIR}/dense_sft_fp32_for_int8"
+PRUNED_FP32_ONNX_DIR="${ONNX_DIR}/nvidia_2_4_sft_fp32_for_int8"
+DENSE_FP32_ONNX="${DENSE_FP32_ONNX_DIR}/model.onnx"
+PRUNED_FP32_ONNX="${PRUNED_FP32_ONNX_DIR}/model.onnx"
+DENSE_INT8_ONNX_DIR="${ONNX_DIR}/dense_sft_int8_qdq"
+PRUNED_INT8_ONNX_DIR="${ONNX_DIR}/nvidia_2_4_sft_int8_qdq"
+DENSE_INT8_ONNX="${DENSE_INT8_ONNX_DIR}/model.onnx"
+PRUNED_INT8_ONNX="${PRUNED_INT8_ONNX_DIR}/model.onnx"
 DENSE_ENGINE="${ENGINE_DIR}/dense_sft_fp16_seq${SEQ_LEN}.plan"
 PRUNED_ENGINE="${ENGINE_DIR}/nvidia_2_4_sft_fp16_seq${SEQ_LEN}.plan"
 
@@ -687,6 +702,8 @@ source_seq_len = int(os.environ["SOURCE_SEQ_LEN"])
 target_seq_len = int(os.environ["TARGET_SEQ_LEN"])
 force = os.environ.get("FORCE_EXPORT", "0").lower() in {"1", "true", "yes", "on"}
 trust_remote_code = os.environ.get("TRUST_REMOTE_CODE", "1").lower() in {"1", "true", "yes", "on"}
+export_dtype = os.environ.get("ONNX_EXPORT_DTYPE", "fp16").lower()
+export_device = os.environ.get("ONNX_EXPORT_DEVICE", "auto").lower()
 
 onnx_path = out_dir / "model.onnx"
 if force and out_dir.exists():
@@ -702,8 +719,16 @@ tokenizer = AutoTokenizer.from_pretrained(
 if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
     tokenizer.pad_token = tokenizer.eos_token
 
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-dtype = torch.float16 if device.type == "cuda" else torch.float32
+if export_device == "auto":
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+else:
+    device = torch.device(export_device)
+if export_dtype == "fp16":
+    dtype = torch.float16 if device.type == "cuda" else torch.float32
+elif export_dtype == "fp32":
+    dtype = torch.float32
+else:
+    raise SystemExit(f"ONNX_EXPORT_DTYPE must be fp16 or fp32, got {export_dtype!r}")
 model = AutoModelForSeq2SeqLM.from_pretrained(
     str(model_dir),
     trust_remote_code=trust_remote_code,
@@ -820,6 +845,8 @@ payload = {
     "onnx_path": str(onnx_path),
     "onnx_path_exists": onnx_path.exists(),
     "export_kind": "logits-only fixed source/target sequence graph",
+    "export_dtype": export_dtype,
+    "export_device": str(device),
     "batch_size": 1,
     "source_seq_len": source_seq_len,
     "target_seq_len": target_seq_len,
@@ -843,6 +870,191 @@ payload = {
 report_json.parent.mkdir(parents=True, exist_ok=True)
 report_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 print(f"Wrote ONNX inspection report: {report_json}")
+PY
+
+  cat > "${HELPER_DIR}/quantize_int8_onnx.py" <<'PY'
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterator
+
+import numpy as np
+import onnx
+from onnx import TensorProto
+from transformers import AutoTokenizer
+
+PROJECT_ROOT = Path.cwd()
+SCRIPTS_DIR = PROJECT_ROOT / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from scenic_prune_eval import extract_prompt_response, read_records  # noqa: E402
+
+try:
+    from onnxruntime.quantization import CalibrationDataReader, QuantFormat, QuantType, quantize_static
+except Exception as exc:
+    raise SystemExit(f"Missing ONNX Runtime quantization support. Install onnxruntime/onnxruntime-gpu. Error: {exc}")
+
+source_onnx = Path(os.environ["SOURCE_ONNX"]).expanduser()
+tokenizer_dir = Path(os.environ["TOKENIZER_DIR"]).expanduser()
+out_dir = Path(os.environ["INT8_ONNX_OUT_DIR"]).expanduser()
+report_json = Path(os.environ["INT8_REPORT_JSON"]).expanduser()
+calibration_json = Path(os.environ["INT8_CALIBRATION_JSON"]).expanduser()
+source_seq_len = int(os.environ["SOURCE_SEQ_LEN"])
+target_seq_len = int(os.environ["TARGET_SEQ_LEN"])
+calibration_samples = int(os.environ.get("INT8_CALIBRATION_SAMPLES", "200"))
+force = os.environ.get("FORCE_INT8", "0").lower() in {"1", "true", "yes", "on"}
+trust_remote_code = os.environ.get("TRUST_REMOTE_CODE", "1").lower() in {"1", "true", "yes", "on"}
+onnx_path = out_dir / "model.onnx"
+
+
+def model_size_bytes(path: Path) -> int:
+    if path.is_file():
+        return path.stat().st_size
+    if not path.exists():
+        return 0
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+
+def inspect_onnx(path: Path) -> dict[str, Any]:
+    model = onnx.load(str(path), load_external_data=False)
+    onnx.checker.check_model(model)
+    dtype_names = {value: key for key, value in TensorProto.DataType.items()}
+    initializer_dtypes: dict[str, int] = {}
+    node_op_types: dict[str, int] = {}
+    qdq_node_count = 0
+    quantized_initializer_count = 0
+    for initializer in model.graph.initializer:
+        dtype_name = dtype_names.get(initializer.data_type, str(initializer.data_type))
+        initializer_dtypes[dtype_name] = initializer_dtypes.get(dtype_name, 0) + 1
+        if initializer.data_type in {TensorProto.INT8, TensorProto.UINT8}:
+            quantized_initializer_count += 1
+    for node in model.graph.node:
+        node_op_types[node.op_type] = node_op_types.get(node.op_type, 0) + 1
+        if node.op_type in {"QuantizeLinear", "DequantizeLinear"}:
+            qdq_node_count += 1
+    return {
+        "input_names": [item.name for item in model.graph.input],
+        "output_names": [item.name for item in model.graph.output],
+        "initializer_dtypes": initializer_dtypes,
+        "node_op_types": node_op_types,
+        "qdq_node_count": qdq_node_count,
+        "quantized_initializer_count": quantized_initializer_count,
+        "onnx_model_size_bytes": model_size_bytes(path.parent),
+        "onnx_model_size_mb": model_size_bytes(path.parent) / 1_000_000,
+    }
+
+
+class ScenicCalibrationReader(CalibrationDataReader):
+    def __init__(self) -> None:
+        tokenizer = AutoTokenizer.from_pretrained(
+            str(tokenizer_dir),
+            trust_remote_code=trust_remote_code,
+            local_files_only=True,
+            use_fast=False,
+        )
+        if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
+            tokenizer.pad_token = tokenizer.eos_token
+        decoder_start_token_id = tokenizer.bos_token_id or tokenizer.eos_token_id or tokenizer.pad_token_id or 0
+        records = read_records(calibration_json)[:calibration_samples]
+        if not records:
+            raise ValueError(f"No calibration records found in {calibration_json}")
+        source_model = onnx.load(str(source_onnx), load_external_data=False)
+        input_names = {item.name for item in source_model.graph.input}
+        rows: list[dict[str, np.ndarray]] = []
+        for record in records:
+            prompt, _ = extract_prompt_response(record)
+            encoded = tokenizer(
+                [prompt],
+                return_tensors="np",
+                padding="max_length",
+                truncation=True,
+                max_length=source_seq_len,
+            )
+            row = {
+                "input_ids": encoded["input_ids"].astype(np.int64),
+                "attention_mask": encoded["attention_mask"].astype(np.int64),
+                "decoder_input_ids": np.full((1, target_seq_len), int(decoder_start_token_id), dtype=np.int64),
+            }
+            rows.append({name: value for name, value in row.items() if name in input_names})
+        self.rows = rows
+        self.iterator: Iterator[dict[str, np.ndarray]] | None = iter(rows)
+
+    def get_next(self) -> dict[str, np.ndarray] | None:
+        if self.iterator is None:
+            self.iterator = iter(self.rows)
+        return next(self.iterator, None)
+
+    def rewind(self) -> None:
+        self.iterator = iter(self.rows)
+
+
+if force and out_dir.exists():
+    shutil.rmtree(out_dir)
+out_dir.mkdir(parents=True, exist_ok=True)
+
+status = "ready"
+error = None
+if not onnx_path.exists() or force:
+    print(f"Quantizing calibrated INT8 QDQ ONNX: {source_onnx} -> {onnx_path}")
+    reader = ScenicCalibrationReader()
+    try:
+        quantize_static(
+            model_input=str(source_onnx),
+            model_output=str(onnx_path),
+            calibration_data_reader=reader,
+            quant_format=QuantFormat.QDQ,
+            activation_type=QuantType.QUInt8,
+            weight_type=QuantType.QInt8,
+            per_channel=True,
+            reduce_range=False,
+            op_types_to_quantize=["MatMul", "Gemm"],
+            extra_options={
+                "ActivationSymmetric": False,
+                "WeightSymmetric": True,
+                "DedicatedQDQPair": True,
+            },
+        )
+    except Exception as exc:
+        status = "failed"
+        error = repr(exc)
+else:
+    print(f"Reusing existing INT8 ONNX: {onnx_path}")
+
+inspection: dict[str, Any] = {}
+if onnx_path.exists():
+    inspection = inspect_onnx(onnx_path)
+elif error is not None:
+    print(f"INT8 quantization failed: {error}", file=sys.stderr)
+
+payload = {
+    "created_at": datetime.now(timezone.utc).isoformat(),
+    "status": status if onnx_path.exists() else "failed",
+    "quantization": "calibrated_static_qdq",
+    "source_onnx": str(source_onnx),
+    "int8_onnx": str(onnx_path),
+    "calibration_json": str(calibration_json),
+    "calibration_samples_requested": calibration_samples,
+    "source_seq_len": source_seq_len,
+    "target_seq_len": target_seq_len,
+    "random_int8_ranges_used": False,
+    "gpu_acceleration_note": (
+        "This is an ONNX QDQ INT8 artifact. GPU acceleration depends on the available ONNX Runtime "
+        "provider kernels. It is not, by itself, proof that NVIDIA 2:4 sparse tensor-core tactics were selected."
+    ),
+    "error": error,
+    **inspection,
+}
+report_json.parent.mkdir(parents=True, exist_ok=True)
+report_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+print(f"Wrote INT8 ONNX report: {report_json}")
+if payload["status"] != "ready":
+    raise SystemExit(f"INT8 ONNX quantization failed for {source_onnx}: {error}")
 PY
 
   cat > "${HELPER_DIR}/trtexec_shape_arg.py" <<'PY'
@@ -1144,9 +1356,16 @@ def path_size_bytes(path: Path) -> int:
     return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
 
 
-def benchmark(onnx_path: Path, tokenizer_dir: Path, model_name: str, sparsity: str, provider: str) -> dict[str, Any] | None:
+def benchmark(
+    onnx_path: Path,
+    tokenizer_dir: Path,
+    model_name: str,
+    sparsity: str,
+    precision: str,
+    provider: str,
+) -> dict[str, Any] | None:
     available = ort.get_available_providers()
-    if provider not in available:
+    if provider not in available or not onnx_path.exists():
         return None
     trust_remote_code = os.environ.get("TRUST_REMOTE_CODE", "1").lower() in {"1", "true", "yes", "on"}
     source_seq_len = int(os.environ["SOURCE_SEQ_LEN"])
@@ -1218,7 +1437,7 @@ def benchmark(onnx_path: Path, tokenizer_dir: Path, model_name: str, sparsity: s
         "Model": model_name,
         "Architecture": "encoder-decoder",
         "Runtime": "ONNX Runtime TensorRT" if provider == "TensorrtExecutionProvider" else "ONNX Runtime CUDA",
-        "Precision": "FP16",
+        "Precision": precision,
         "Sparsity": sparsity,
         "Seq. Len.": source_seq_len,
         "Batch Size": 1,
@@ -1240,18 +1459,28 @@ def benchmark(onnx_path: Path, tokenizer_dir: Path, model_name: str, sparsity: s
 
 rows: list[dict[str, Any]] = []
 for provider in ("CUDAExecutionProvider", "TensorrtExecutionProvider"):
-    dense = benchmark(Path(os.environ["DENSE_ONNX"]), Path(os.environ["DENSE_CKPT"]), "dense_sft_fp16", "dense", provider)
-    pruned = benchmark(
-        Path(os.environ["PRUNED_ONNX"]),
-        Path(os.environ["PRUNED_CKPT"]),
-        "nvidia_2_4_sft_fp16",
-        "NVIDIA 2:4",
-        provider,
-    )
-    if dense is not None:
-        rows.append(dense)
-    if pruned is not None:
-        rows.append(pruned)
+    specs = [
+        (Path(os.environ["DENSE_ONNX"]), Path(os.environ["DENSE_CKPT"]), "dense_sft_fp16", "dense", "FP16"),
+        (Path(os.environ["PRUNED_ONNX"]), Path(os.environ["PRUNED_CKPT"]), "nvidia_2_4_sft_fp16", "NVIDIA 2:4", "FP16"),
+        (
+            Path(os.environ["DENSE_INT8_ONNX"]),
+            Path(os.environ["DENSE_CKPT"]),
+            "dense_sft_int8_qdq",
+            "dense",
+            "INT8 QDQ",
+        ),
+        (
+            Path(os.environ["PRUNED_INT8_ONNX"]),
+            Path(os.environ["PRUNED_CKPT"]),
+            "nvidia_2_4_sft_int8_qdq",
+            "NVIDIA 2:4",
+            "INT8 QDQ",
+        ),
+    ]
+    for onnx_path, tokenizer_dir, model_name, sparsity, precision in specs:
+        row = benchmark(onnx_path, tokenizer_dir, model_name, sparsity, precision, provider)
+        if row is not None:
+            rows.append(row)
 
 output_json = Path(os.environ["OUTPUT_JSON"])
 payload = {
@@ -1717,7 +1946,8 @@ lines = [
     "- Native TensorRT benchmarking uses that logits-only graph, so the TensorRT latency row is not full autoregressive generation latency.",
     "- PyTorch latency rows are end-to-end greedy generation and are therefore not directly equivalent to logits-only TensorRT rows.",
     "- CPU ONNX rows are excluded from final speedup calculations.",
-    "- INT8 is skipped unless a real Q/DQ export or calibration path is added; random INT8 ranges are not used.",
+    "- INT8 ONNX artifacts use calibrated static QDQ from real data; random INT8 ranges are not used.",
+    "- ONNX INT8 GPU acceleration depends on available ONNX Runtime CUDA/TensorRT kernels and is not the same as proof of 2:4 sparse tensor-core tactic selection.",
     "",
     "## Files",
     "",
@@ -1862,28 +2092,99 @@ run_onnx_export() {
   "$PYTHON" "${HELPER_DIR}/export_inspect_onnx.py" 2>&1 | tee "${LOG_DIR}/export_nvidia_2_4_onnx.log"
 }
 
-write_int8_status() {
-  "$PYTHON" - "${REPORT_DIR}/int8_status.json" <<'PY'
+run_int8_onnx_export() {
+  if truthy "$SKIP_INT8"; then
+    "$PYTHON" - "${REPORT_DIR}/int8_status.json" <<'PY'
 from __future__ import annotations
-
-import json
-import sys
+import json, sys
 from datetime import datetime, timezone
 from pathlib import Path
-
 path = Path(sys.argv[1])
 payload = {
     "created_at": datetime.now(timezone.utc).isoformat(),
     "status": "skipped",
-    "reason": (
-        "No repo-native Q/DQ ONNX export, calibration cache, or TensorRT calibration dataloader "
-        "is available in this script. INT8 engines and INT8 EM claims are intentionally skipped."
-    ),
+    "reason": "SKIP_INT8=1",
     "random_int8_ranges_used": False,
 }
-path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-print(f"Wrote INT8 status: {path}")
+PY
+    return
+  fi
+
+  echo "== Exporting FP32 ONNX sources for calibrated INT8 QDQ =="
+  MODEL_DIR="$DENSE_CKPT" \
+  ONNX_OUT_DIR="$DENSE_FP32_ONNX_DIR" \
+  ONNX_REPORT_JSON="${REPORT_DIR}/onnx_inspection_dense_sft_fp32_for_int8.json" \
+  SOURCE_SEQ_LEN="$SOURCE_SEQ_LEN" \
+  TARGET_SEQ_LEN="$TARGET_SEQ_LEN" \
+  FORCE_EXPORT="$FORCE_EXPORT" \
+  TRUST_REMOTE_CODE="$TRUST_REMOTE_CODE" \
+  ONNX_EXPORT_DTYPE=fp32 \
+  ONNX_EXPORT_DEVICE="${ONNX_EXPORT_DEVICE:-auto}" \
+  "$PYTHON" "${HELPER_DIR}/export_inspect_onnx.py" 2>&1 | tee "${LOG_DIR}/export_dense_fp32_for_int8_onnx.log"
+
+  MODEL_DIR="$PRUNED_CKPT" \
+  ONNX_OUT_DIR="$PRUNED_FP32_ONNX_DIR" \
+  ONNX_REPORT_JSON="${REPORT_DIR}/onnx_inspection_nvidia_2_4_sft_fp32_for_int8.json" \
+  SOURCE_SEQ_LEN="$SOURCE_SEQ_LEN" \
+  TARGET_SEQ_LEN="$TARGET_SEQ_LEN" \
+  FORCE_EXPORT="$FORCE_EXPORT" \
+  TRUST_REMOTE_CODE="$TRUST_REMOTE_CODE" \
+  ONNX_EXPORT_DTYPE=fp32 \
+  ONNX_EXPORT_DEVICE="${ONNX_EXPORT_DEVICE:-auto}" \
+  "$PYTHON" "${HELPER_DIR}/export_inspect_onnx.py" 2>&1 | tee "${LOG_DIR}/export_nvidia_2_4_fp32_for_int8_onnx.log"
+
+  echo "== Quantizing calibrated INT8 QDQ ONNX artifacts =="
+  SOURCE_ONNX="$DENSE_FP32_ONNX" \
+  TOKENIZER_DIR="$DENSE_CKPT" \
+  INT8_ONNX_OUT_DIR="$DENSE_INT8_ONNX_DIR" \
+  INT8_REPORT_JSON="${REPORT_DIR}/onnx_inspection_dense_sft_int8_qdq.json" \
+  INT8_CALIBRATION_JSON="$INT8_CALIBRATION_JSON" \
+  INT8_CALIBRATION_SAMPLES="$INT8_CALIBRATION_SAMPLES" \
+  SOURCE_SEQ_LEN="$SOURCE_SEQ_LEN" \
+  TARGET_SEQ_LEN="$TARGET_SEQ_LEN" \
+  FORCE_INT8="$FORCE_INT8" \
+  TRUST_REMOTE_CODE="$TRUST_REMOTE_CODE" \
+  "$PYTHON" "${HELPER_DIR}/quantize_int8_onnx.py" 2>&1 | tee "${LOG_DIR}/quantize_dense_int8_qdq_onnx.log"
+
+  SOURCE_ONNX="$PRUNED_FP32_ONNX" \
+  TOKENIZER_DIR="$PRUNED_CKPT" \
+  INT8_ONNX_OUT_DIR="$PRUNED_INT8_ONNX_DIR" \
+  INT8_REPORT_JSON="${REPORT_DIR}/onnx_inspection_nvidia_2_4_sft_int8_qdq.json" \
+  INT8_CALIBRATION_JSON="$INT8_CALIBRATION_JSON" \
+  INT8_CALIBRATION_SAMPLES="$INT8_CALIBRATION_SAMPLES" \
+  SOURCE_SEQ_LEN="$SOURCE_SEQ_LEN" \
+  TARGET_SEQ_LEN="$TARGET_SEQ_LEN" \
+  FORCE_INT8="$FORCE_INT8" \
+  TRUST_REMOTE_CODE="$TRUST_REMOTE_CODE" \
+  "$PYTHON" "${HELPER_DIR}/quantize_int8_onnx.py" 2>&1 | tee "${LOG_DIR}/quantize_nvidia_2_4_int8_qdq_onnx.log"
+
+  "$PYTHON" - "${REPORT_DIR}/int8_status.json" "${REPORT_DIR}/onnx_inspection_dense_sft_int8_qdq.json" "${REPORT_DIR}/onnx_inspection_nvidia_2_4_sft_int8_qdq.json" <<'PY'
+from __future__ import annotations
+import json, sys
+from datetime import datetime, timezone
+from pathlib import Path
+status_path = Path(sys.argv[1])
+dense_report = Path(sys.argv[2])
+pruned_report = Path(sys.argv[3])
+reports = [json.loads(path.read_text(encoding="utf-8")) for path in (dense_report, pruned_report)]
+payload = {
+    "created_at": datetime.now(timezone.utc).isoformat(),
+    "status": "ready" if all(item.get("status") == "ready" for item in reports) else "partial",
+    "quantization": "calibrated_static_qdq",
+    "dense_int8_onnx": reports[0].get("int8_onnx"),
+    "nvidia_2_4_int8_onnx": reports[1].get("int8_onnx"),
+    "calibration_json": reports[0].get("calibration_json"),
+    "calibration_samples_requested": reports[0].get("calibration_samples_requested"),
+    "random_int8_ranges_used": False,
+    "gpu_acceleration_note": (
+        "These are ONNX QDQ INT8 artifacts. GPU acceleration depends on CUDA/TensorRT ONNX Runtime providers "
+        "and kernels; sparse hardware acceleration still needs backend evidence such as sparse tactic selection."
+    ),
+    "reports": [str(dense_report), str(pruned_report)],
+}
+status_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+print(f"Wrote INT8 status: {status_path}")
 PY
 }
 
@@ -1984,6 +2285,8 @@ run_latency_reports() {
   CUDA_VISIBLE_DEVICES="${GPU_ARRAY[0]}" \
   DENSE_ONNX="$DENSE_ONNX" \
   PRUNED_ONNX="$PRUNED_ONNX" \
+  DENSE_INT8_ONNX="$DENSE_INT8_ONNX" \
+  PRUNED_INT8_ONNX="$PRUNED_INT8_ONNX" \
   DENSE_CKPT="$DENSE_CKPT" \
   PRUNED_CKPT="$PRUNED_CKPT" \
   IOT200_JSONL="$IOT200_JSONL" \
@@ -2044,7 +2347,7 @@ materialize_hf_base_model
 run_training
 run_prune_eval
 run_onnx_export
-write_int8_status
+run_int8_onnx_export
 run_tensorrt_builds
 run_latency_reports
 compose_results
