@@ -8,7 +8,7 @@ This experiment block addresses the revision question of whether SCENIC pruning 
 
 - `dense`: no pruning, target sparsity 0.0.
 - `oneshot`: selected `torch.nn.Linear.weight` tensors are pruned once after checkpoint loading. This is the original manuscript-style pruning condition.
-- `progressive`: selected Linear weights are pruned through staged masks. By default, the added progressive method performs one final recovery epoch after all pruning stages; per-stage recovery is available as an explicit ablation.
+- `progressive`: selected Linear weights are pruned through staged masks. By default, the added progressive method performs one recovery epoch after each pruning stage plus one final recovery epoch after all stages.
 
 The default sparsity levels are 0%, 30%, and 50%. These add a moderate pruning point and preserve the manuscript's current 50% setting so the paper can show whether conclusions are stable under less aggressive compression.
 
@@ -47,7 +47,7 @@ For target 50%:
 
 - 10%, 20%, 30%, 40%, 50%
 
-At each stage, the runner updates masks and logs stage sparsity, validation EM@1, validation EM@5, and loss. The default keeps `--recovery_epochs_per_stage 0` and `--final_recovery_epochs 1`, so the added progressive methods have only one recovery fine-tuning epoch. Set `--recovery_epochs_per_stage 1` for the fuller staged-recovery ablation.
+At each stage, the runner updates masks, performs the configured recovery fine-tuning, reapplies masks after optimizer steps, and logs stage sparsity, validation EM@1, validation EM@5, and loss. The default keeps `--recovery_epochs_per_stage 1` and `--final_recovery_epochs 1`, so target 30% gets recovery after 10%, 20%, and 30% plus one final recovery epoch, while target 50% gets recovery after 10%, 20%, 30%, 40%, and 50% plus one final recovery epoch.
 
 ## EM@1 and EM@5
 
@@ -130,7 +130,7 @@ python scripts/run_sparsity_experiments.py \
   --pruning_modes dense oneshot progressive \
   --prune_scope linear_weights \
   --prune_method magnitude \
-  --recovery_epochs_per_stage 0 \
+  --recovery_epochs_per_stage 1 \
   --final_recovery_epochs 1 \
   --num_beams 5 \
   --num_return_sequences 5 \

@@ -16,8 +16,9 @@ This one launcher:
   4. Runs the added one-shot 30% pruning/eval suite for both checkpoints.
   5. Runs the new 0/30/50 linear sparsity matrix for both checkpoints:
        dense_0, oneshot_30, oneshot_50, progressive_30, progressive_50
-     Progressive methods default to one final recovery epoch total, and these
-     added pruning jobs are split across the visible GPUs by default.
+     Progressive methods default to one recovery epoch after each pruning stage
+     plus one final recovery epoch, and these added pruning jobs are split
+     across the visible GPUs by default.
   6. Optionally runs ONNX FP32/FP16/INT8 precision benchmark tables.
 
 Common overrides:
@@ -35,7 +36,7 @@ Common overrides:
   LEGACY_30_PRUNE_METHODS="magnitude wanda gradient"
   SPARSITY_LEVELS="0 0.3 0.5"
   SPARSITY_PRUNING_MODES="dense oneshot progressive"
-  SPARSITY_RECOVERY_EPOCHS_PER_STAGE=0
+  SPARSITY_RECOVERY_EPOCHS_PER_STAGE=1
   SPARSITY_FINAL_RECOVERY_EPOCHS=1
   ONNX_BENCHMARK_PROVIDERS="CPUExecutionProvider CUDAExecutionProvider"
   DEVICE_NAME="Jetson Orin Nano"
@@ -91,7 +92,7 @@ SPARSITY_LEVELS="${SPARSITY_LEVELS:-0 0.3 0.5}"
 SPARSITY_PRUNING_MODES="${SPARSITY_PRUNING_MODES:-dense oneshot progressive}"
 RUN_SPARSITY_PARALLEL="${RUN_SPARSITY_PARALLEL:-1}"
 SPARSITY_GPU_IDS="${SPARSITY_GPU_IDS:-}"
-SPARSITY_RECOVERY_EPOCHS_PER_STAGE="${SPARSITY_RECOVERY_EPOCHS_PER_STAGE:-0}"
+SPARSITY_RECOVERY_EPOCHS_PER_STAGE="${SPARSITY_RECOVERY_EPOCHS_PER_STAGE:-1}"
 SPARSITY_FINAL_RECOVERY_EPOCHS="${SPARSITY_FINAL_RECOVERY_EPOCHS:-1}"
 SPARSITY_NUM_BEAMS="${SPARSITY_NUM_BEAMS:-5}"
 SPARSITY_NUM_RETURN_SEQUENCES="${SPARSITY_NUM_RETURN_SEQUENCES:-5}"

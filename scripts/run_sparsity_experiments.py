@@ -80,8 +80,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--recovery_epochs_per_stage",
         type=int,
-        default=0,
-        help="Default is 0 so added progressive methods only retrain once after all mask stages.",
+        default=1,
+        help="Recovery epochs after each progressive mask stage. Default: 1.",
     )
     parser.add_argument(
         "--final_recovery_epochs",
