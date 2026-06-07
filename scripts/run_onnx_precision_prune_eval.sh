@@ -533,6 +533,7 @@ create_pruned_checkpoint() {
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from datetime import datetime, timezone
@@ -789,6 +790,7 @@ evaluate_accuracy_variant() {
   MAX_NEW_TOKENS="$MAX_NEW_TOKENS" \
   IGNORE_SPACES="$IGNORE_SPACES" \
   INCLUDE_PREDICTIONS="$INCLUDE_PREDICTIONS" \
+  ALLOWED_GENERATION_TOKEN_COUNT="${ALLOWED_GENERATION_TOKEN_COUNT:-0}" \
   LOCAL_FILES_ONLY=1 \
   TRUST_REMOTE_CODE="$TRUST_REMOTE_CODE" \
   PYTORCH_DEVICE="$PYTORCH_DEVICE" \
@@ -890,7 +892,19 @@ def onnx_embedding_vocab_size(source_path: Path) -> int | None:
             dims = list(initializer.dims)
             if len(dims) == 2 and dims[0] > 0:
                 candidates.append(int(dims[0]))
-    return min(candidates) if candidates else None
+    if candidates:
+        return min(candidates)
+    config_path = source_path / "config.json"
+    if config_path.exists():
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            config = {}
+        for key in ("vocab_size", "decoder_vocab_size"):
+            value = config.get(key)
+            if isinstance(value, int) and value > 0:
+                return value
+    return None
 
 
 def cuda_provider_options() -> dict[str, str]:
@@ -989,6 +1003,11 @@ parser.add_argument("--max-input-len", type=int, default=int(os.environ["MAX_INP
 parser.add_argument("--max-new-tokens", type=int, default=int(os.environ["MAX_NEW_TOKENS"]))
 parser.add_argument("--num-beams", type=int, default=int(os.environ["NUM_BEAMS"]))
 parser.add_argument("--num-return-sequences", type=int, default=int(os.environ["NUM_RETURN_SEQUENCES"]))
+parser.add_argument(
+    "--allowed-generation-token-count",
+    type=int,
+    default=int(os.environ.get("ALLOWED_GENERATION_TOKEN_COUNT", "0") or 0),
+)
 parser.add_argument("--ignore-spaces", action=argparse.BooleanOptionalAction, default=env_bool("IGNORE_SPACES", True))
 parser.add_argument(
     "--include-predictions",
@@ -1100,6 +1119,10 @@ datasets = {
     "training": train_records,
 }
 tokenizer_embedding_check = assert_token_ids_fit_embedding(runtime, source_path, tokenizer, datasets, args.max_input_len)
+if runtime != "pytorch" and args.allowed_generation_token_count <= 0:
+    inferred_vocab_size = tokenizer_embedding_check.get("embedding_vocab_size")
+    if isinstance(inferred_vocab_size, int) and inferred_vocab_size > 0:
+        args.allowed_generation_token_count = inferred_vocab_size
 results = evaluate_all(model, tokenizer, datasets, args, state, label=os.environ["VARIANT_LABEL"])
 engine_size_bytes = path_size_bytes(engine_cache_dir) if engine_cache_dir is not None else 0
 report = {
@@ -1123,6 +1146,7 @@ report = {
         "max_new_tokens": args.max_new_tokens,
         "ignore_spaces": args.ignore_spaces,
         "batch_size": args.eval_batch_size,
+        "allowed_generation_token_count": args.allowed_generation_token_count,
     },
     "datasets": {
         "benchmark": {
@@ -1584,6 +1608,20 @@ def tokenizer_for(path: Path, fallback: Path | None = None) -> Any:
     return tokenizer
 
 
+def generation_token_limit_for(path: Path, tokenizer: Any) -> int:
+    config_path = path / "config.json"
+    if config_path.exists():
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            config = {}
+        for key in ("vocab_size", "decoder_vocab_size"):
+            value = config.get(key)
+            if isinstance(value, int) and value > 0:
+                return value
+    return len(tokenizer)
+
+
 class RuntimeModel:
     def __init__(self, runtime: str, source: Path, tokenizer_fallback: Path | None, provider: str | None, cache_dir: Path | None) -> None:
         self.runtime = runtime
@@ -1592,6 +1630,7 @@ class RuntimeModel:
         self.cache_dir = cache_dir
         self.device: torch.device | None = None
         self.tokenizer = tokenizer_for(source, tokenizer_fallback)
+        self.allowed_generation_token_count = generation_token_limit_for(source, self.tokenizer)
 
         if runtime == "pytorch":
             requested = os.environ.get("PYTORCH_DEVICE", "auto")
@@ -1644,15 +1683,18 @@ class RuntimeModel:
         encoded.pop("token_type_ids", None)
         if self.device is not None:
             encoded = {key: value.to(self.device) for key, value in encoded.items()}
+        generation_kwargs = {
+            "max_new_tokens": max_new_tokens,
+            "num_beams": num_beams,
+            "num_return_sequences": 1,
+            "do_sample": False,
+            "early_stopping": True,
+        }
+        if self.allowed_generation_token_count > 0:
+            allowed_token_ids = list(range(self.allowed_generation_token_count))
+            generation_kwargs["prefix_allowed_tokens_fn"] = lambda _batch_id, _sent: allowed_token_ids
         with torch.no_grad():
-            self.model.generate(
-                **encoded,
-                max_new_tokens=max_new_tokens,
-                num_beams=num_beams,
-                num_return_sequences=1,
-                do_sample=False,
-                early_stopping=True,
-            )
+            self.model.generate(**encoded, **generation_kwargs)
 
 
 benchmark_records = read_records(Path(os.environ["BENCHMARK_JSON"]).expanduser())

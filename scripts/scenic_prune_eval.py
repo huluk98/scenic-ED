@@ -147,6 +147,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument("--num-beams", type=int, default=5)
     parser.add_argument("--num-return-sequences", type=int, default=5)
+    parser.add_argument(
+        "--allowed-generation-token-count",
+        type=int,
+        default=0,
+        help="When >0, constrain generated token ids to [0, count) to avoid decoder embedding gathers out of range.",
+    )
     parser.add_argument("--ignore-spaces", action="store_true")
     parser.add_argument("--local-files-only", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--trust-remote-code", action=argparse.BooleanOptionalAction, default=True)
@@ -520,14 +526,18 @@ def evaluate_local_records(
             max_length=args.max_input_len,
         )
         encoded = {key: value.to(state.device) for key, value in encoded.items() if key != "token_type_ids"}
-        generated = model.generate(
-            **encoded,
-            max_new_tokens=args.max_new_tokens,
-            num_beams=args.num_beams,
-            num_return_sequences=args.num_return_sequences,
-            do_sample=False,
-            early_stopping=True,
-        )
+        generation_kwargs = {
+            "max_new_tokens": args.max_new_tokens,
+            "num_beams": args.num_beams,
+            "num_return_sequences": args.num_return_sequences,
+            "do_sample": False,
+            "early_stopping": True,
+        }
+        allowed_token_count = int(getattr(args, "allowed_generation_token_count", 0) or 0)
+        if allowed_token_count > 0:
+            allowed_token_ids = list(range(allowed_token_count))
+            generation_kwargs["prefix_allowed_tokens_fn"] = lambda _batch_id, _sent: allowed_token_ids
+        generated = model.generate(**encoded, **generation_kwargs)
         decoded = tokenizer.batch_decode(
             generated,
             skip_special_tokens=True,
