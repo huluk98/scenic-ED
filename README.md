@@ -1,19 +1,9 @@
 # SCENIC ED
 
-H20 ONNX Runtime GPU setup and 50% gradient-pruned ONNX FP16/INT8 baseline:
+Verified H20 ONNX Runtime GPU setup:
 
 ```bash
 git pull
-python -m pip uninstall -y onnxruntime onnxruntime-gpu
-python -m pip install --extra-index-url https://pypi.nvidia.com \
-  "onnxruntime-gpu[cuda,cudnn]>=1.19" \
-  "optimum[onnxruntime-gpu]>=1.23" \
-  "onnx>=1.16" "onnxscript>=0.3" "safetensors>=0.4.5" "tensorrt>=10"
-```
-
-Verify that ONNX Runtime can see the H20 GPUs:
-
-```bash
 python - <<'PY'
 import sys, torch, onnxruntime as ort
 print("python:", sys.executable)
@@ -23,11 +13,25 @@ print("providers:", ort.get_available_providers())
 PY
 ```
 
-The provider list must include `CUDAExecutionProvider`. Then run:
+Expected provider list after the fixed install:
+
+```text
+TensorrtExecutionProvider
+CUDAExecutionProvider
+CPUExecutionProvider
+```
+
+If PyTorch reports 9 GPUs but you want only the 8 H20s, pin the run to GPUs 0-7:
 
 ```bash
-NPROC_PER_NODE=8 ACCURACY_GPU_IDS=0,1,2,3,4,5,6,7 bash scripts/run_gradient50_onnx_quant_baseline.sh charent/ChatLM-mini-Chinese
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+NPROC_PER_NODE=8 \
+ACCURACY_GPU_IDS=0,1,2,3,4,5,6,7 \
+FP16_ONNX_PROVIDER=CUDAExecutionProvider \
+bash scripts/run_gradient50_onnx_quant_baseline.sh charent/ChatLM-mini-Chinese
 ```
+
+ONNX FP16 should use `CUDAExecutionProvider`. Dynamic ONNX INT8 may still be slower or fall back because CUDA EP does not accelerate every quantized operator. If you only need benchmark accuracy and want to skip full training-data EM, add `MAX_TRAIN_EXAMPLES=0` to the command.
 
 SCENIC edge-device training utilities and compact dataset artifacts for ChatLM-mini-Chinese SFT experiments.
 
