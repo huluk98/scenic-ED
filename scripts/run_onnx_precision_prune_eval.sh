@@ -2182,6 +2182,13 @@ for key, label, path in accuracy_specs:
         "runtime": report.get("runtime"),
         "precision": report.get("precision"),
         "source_path": report.get("source_path"),
+        "onnx_provider": report.get("onnx_provider"),
+        "onnx_provider_options": report.get("onnx_provider_options"),
+        "onnx_session_providers": report.get("onnx_session_providers"),
+        "generation": report.get("generation"),
+        "datasets": report.get("datasets"),
+        "sharded_accuracy_eval": report.get("sharded_accuracy_eval"),
+        "shard": report.get("shard"),
         "model_or_engine_size_mb": report.get("model_or_engine_size_mb"),
         "summary": summary,
     }
