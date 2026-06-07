@@ -1,5 +1,9 @@
 # SCENIC ED
 
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NPROC_PER_NODE=8 ACCURACY_GPU_IDS=0,1,2,3,4,5,6,7 RUN_ACCURACY_SHARDED=1 ACCURACY_SHARD_PARALLELISM=4 FP16_ONNX_PROVIDER=CUDAExecutionProvider RUN_PYTORCH_ACCURACY=0 RUN_RUNTIME_BENCHMARK=0 bash scripts/run_gradient50_onnx_quant_baseline.sh charent/ChatLM-mini-Chinese
+```
+
 Verified H20 ONNX Runtime GPU setup:
 
 ```bash
