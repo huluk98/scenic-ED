@@ -4,6 +4,8 @@
 git pull && CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NPROC_PER_NODE=8 ACCURACY_GPU_IDS=0,1,2,3,4,5,6,7 ACCURACY_SHARD_PARALLELISM=8 FP16_ONNX_PROVIDER=CUDAExecutionProvider INT8_ONNX_PROVIDER=CUDAExecutionProvider bash scripts/run_clean_h20_onnx_fp16_int8.sh charent/ChatLM-mini-Chinese
 ```
 
+The clean launcher repairs every fine-tuned/pruned checkpoint from the original Hugging Face base model source, so `modeling*.py` / `modeling_chat*.py` comes from `charent/ChatLM-mini-Chinese` unless you explicitly override `SOURCE_ASSET_DIR`.
+
 Verified H20 ONNX Runtime GPU setup:
 
 ```bash

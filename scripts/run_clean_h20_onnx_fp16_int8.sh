@@ -12,9 +12,10 @@ Default:
 This is the clean H20 ONNX-only launcher:
   1. Start from a fresh OUTPUT_ROOT every run.
   2. Use GPUs 0-7 for 5-epoch contrastive SFT.
-  3. Create the contrastive 50% gradient one-shot pruned checkpoint.
-  4. Export dense/pruned ONNX FP16 and dynamic ONNX INT8.
-  5. Evaluate ONNX FP16 and ONNX INT8 only, sharded across the 8 GPUs.
+  3. Repair checkpoint assets from the original base model, including Hugging Face modeling*.py files.
+  4. Create the contrastive 50% gradient one-shot pruned checkpoint.
+  5. Export dense/pruned ONNX FP16 and dynamic ONNX INT8.
+  6. Evaluate ONNX FP16 and ONNX INT8 only, sharded across the 8 GPUs.
 
 Useful overrides:
   OUTPUT_ROOT=onnx_eval_outputs/my_clean_run
@@ -51,6 +52,7 @@ export ACCURACY_SHARD_RETRIES="${ACCURACY_SHARD_RETRIES:-1}"
 
 export FINETUNE_MODE="${FINETUNE_MODE:-contrastive}"
 export FINETUNE_TRAIN_JSON="${FINETUNE_TRAIN_JSON:-data/SCENIC_full_anchor_positive_negative.json}"
+export SOURCE_ASSET_DIR="${SOURCE_ASSET_DIR:-$BASE_MODEL}"
 export PRUNE_METHOD="${PRUNE_METHOD:-gradient}"
 export SPARSITY="${SPARSITY:-0.5}"
 export PRUNED_VARIANT="${PRUNED_VARIANT:-clean_contrastive_gradient50}"
