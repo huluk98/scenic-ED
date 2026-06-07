@@ -176,6 +176,7 @@ NUM_BEAMS="${NUM_BEAMS:-5}"
 NUM_RETURN_SEQUENCES="${NUM_RETURN_SEQUENCES:-5}"
 MAX_INPUT_LEN="${MAX_INPUT_LEN:-256}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-128}"
+SPLIT_EM1_EM5="${SPLIT_EM1_EM5:-0}"
 INCLUDE_PREDICTIONS="${INCLUDE_PREDICTIONS:-1}"
 IGNORE_SPACES="${IGNORE_SPACES:-1}"
 FORCE_ACCURACY="${FORCE_ACCURACY:-0}"
@@ -799,6 +800,7 @@ evaluate_accuracy_variant() {
   NUM_RETURN_SEQUENCES="$NUM_RETURN_SEQUENCES" \
   MAX_INPUT_LEN="$MAX_INPUT_LEN" \
   MAX_NEW_TOKENS="$MAX_NEW_TOKENS" \
+  SPLIT_EM1_EM5="$SPLIT_EM1_EM5" \
   IGNORE_SPACES="$IGNORE_SPACES" \
   INCLUDE_PREDICTIONS="$INCLUDE_PREDICTIONS" \
   ALLOWED_GENERATION_TOKEN_COUNT="${ALLOWED_GENERATION_TOKEN_COUNT:-0}" \
@@ -1138,6 +1140,7 @@ parser.add_argument("--max-input-len", type=int, default=int(os.environ["MAX_INP
 parser.add_argument("--max-new-tokens", type=int, default=int(os.environ["MAX_NEW_TOKENS"]))
 parser.add_argument("--num-beams", type=int, default=int(os.environ["NUM_BEAMS"]))
 parser.add_argument("--num-return-sequences", type=int, default=int(os.environ["NUM_RETURN_SEQUENCES"]))
+parser.add_argument("--split-em1-em5", action=argparse.BooleanOptionalAction, default=env_bool("SPLIT_EM1_EM5", False))
 parser.add_argument(
     "--allowed-generation-token-count",
     type=int,
@@ -1307,6 +1310,7 @@ report = {
         "max_new_tokens": args.max_new_tokens,
         "ignore_spaces": args.ignore_spaces,
         "batch_size": args.eval_batch_size,
+        "split_em1_em5": args.split_em1_em5,
         "allowed_generation_token_count": args.allowed_generation_token_count,
     },
     "datasets": {
@@ -2287,7 +2291,7 @@ echo "Original model: $ORIGINAL_MODEL"
 echo "Fine-tune: ${FINETUNE_MODE}, ${FINETUNE_EPOCHS} epoch(s), train=${FINETUNE_TRAIN_JSON}"
 echo "Benchmark accuracy data: $BENCHMARK_JSON"
 echo "Deployment benchmark seq lengths: $LATENCY_SEQ_LENGTHS, batch=1"
-echo "Accuracy generation: beams=${NUM_BEAMS}, returns=${NUM_RETURN_SEQUENCES}, max_new_tokens=${MAX_NEW_TOKENS}, max_benchmark=${MAX_BENCHMARK_EXAMPLES}, max_train=${MAX_TRAIN_EXAMPLES:-full}"
+echo "Accuracy generation: beams=${NUM_BEAMS}, returns=${NUM_RETURN_SEQUENCES}, max_new_tokens=${MAX_NEW_TOKENS}, split_em1_em5=${SPLIT_EM1_EM5}, max_benchmark=${MAX_BENCHMARK_EXAMPLES}, max_train=${MAX_TRAIN_EXAMPLES:-full}"
 
 run_finetune
 repair_checkpoint_assets "$FINETUNED_CHECKPOINT_DIR" "$SOURCE_ASSET_DIR" "fine-tuned checkpoint"

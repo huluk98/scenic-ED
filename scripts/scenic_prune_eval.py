@@ -148,6 +148,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-beams", type=int, default=5)
     parser.add_argument("--num-return-sequences", type=int, default=5)
     parser.add_argument(
+        "--split-em1-em5",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Score EM1 from a separate top-1 beam call while scoring EM5 from all returned beams.",
+    )
+    parser.add_argument(
         "--allowed-generation-token-count",
         type=int,
         default=0,
@@ -537,6 +543,19 @@ def evaluate_local_records(
         if allowed_token_count > 0:
             allowed_token_ids = list(range(allowed_token_count))
             generation_kwargs["prefix_allowed_tokens_fn"] = lambda _batch_id, _sent: allowed_token_ids
+        split_em1_em5 = bool(getattr(args, "split_em1_em5", False)) and args.num_return_sequences > 1
+        top1_decoded: list[str] | None = None
+        if split_em1_em5:
+            top1_kwargs = {
+                **generation_kwargs,
+                "num_return_sequences": 1,
+            }
+            top1_generated = model.generate(**encoded, **top1_kwargs)
+            top1_decoded = tokenizer.batch_decode(
+                top1_generated,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=True,
+            )
         generated = model.generate(**encoded, **generation_kwargs)
         decoded = tokenizer.batch_decode(
             generated,
@@ -548,9 +567,11 @@ def evaluate_local_records(
             predictions = decoded[
                 offset * args.num_return_sequences : (offset + 1) * args.num_return_sequences
             ]
+            em1_prediction = top1_decoded[offset] if top1_decoded is not None else (predictions[0] if predictions else "")
             gold = normalize_text(targets[offset], args.ignore_spaces)
             normalized_predictions = [normalize_text(prediction, args.ignore_spaces) for prediction in predictions]
-            em1 = bool(normalized_predictions and normalized_predictions[0] == gold)
+            normalized_em1_prediction = normalize_text(em1_prediction, args.ignore_spaces)
+            em1 = normalized_em1_prediction == gold
             em5 = gold in normalized_predictions
             em1_correct += int(em1)
             em5_correct += int(em5)
@@ -561,7 +582,8 @@ def evaluate_local_records(
                         "index": indices[offset],
                         "prompt": prompt,
                         "target": targets[offset],
-                        "em1_prediction": predictions[0] if predictions else "",
+                        "em1_prediction": em1_prediction,
+                        "em1_prediction_source": "separate_top1_beam" if split_em1_em5 else "first_returned_sequence",
                         "em5_predictions": predictions,
                         "em1_correct": em1,
                         "em5_correct": em5,
