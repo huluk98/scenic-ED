@@ -21,10 +21,11 @@ matplotlib>=3.8
 numpy>=1.26
 onnx>=1.16
 onnxconverter-common>=1.14
-onnxruntime-gpu>=1.18; platform_system == "Linux"
+onnxruntime-gpu[cuda,cudnn]>=1.19; platform_system == "Linux"
 onnxruntime>=1.18; platform_system != "Linux"
 onnxscript>=0.3
-optimum[onnxruntime]>=1.23
+optimum[onnxruntime-gpu]>=1.23; platform_system == "Linux"
+optimum[onnxruntime]>=1.23; platform_system != "Linux"
 openai==2.38.0
 pandas>=2.0
 psutil>=5.9

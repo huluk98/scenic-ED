@@ -1,9 +1,9 @@
 # SCENIC ED
 
-Run the 8-GPU 50% gradient-pruned accuracy-only baseline:
+Run the 50% gradient-pruned ONNX FP16/INT8 baseline:
 
 ```bash
-NPROC_PER_NODE=8 bash scripts/run_gradient50_accuracy_only_8gpu.sh charent/ChatLM-mini-Chinese
+NPROC_PER_NODE=8 ACCURACY_GPU_IDS=0,1,2,3,4,5,6,7 bash scripts/run_gradient50_onnx_quant_baseline.sh charent/ChatLM-mini-Chinese
 ```
 
 SCENIC edge-device training utilities and compact dataset artifacts for ChatLM-mini-Chinese SFT experiments.
@@ -29,16 +29,31 @@ Install dependencies:
 conda create -n scenic-ed python=3.10 -y
 conda activate scenic-ed
 python -m pip install -U pip
-python -m pip uninstall -y torch torchvision torchaudio
+python -m pip uninstall -y torch torchvision torchaudio onnxruntime onnxruntime-gpu
 python -m pip install -r requirements.txt
 ```
 
 `requirements.txt` installs the CUDA 12.8 PyTorch wheel on Linux, which is the right match for NVIDIA H20 machines with driver `570.124.06`.
 
-For the H20 ONNX/TensorRT deployment launcher, install the additional Python-side deployment packages and TensorRT bindings with one copy-paste line:
+For the H20 ONNX/TensorRT deployment launcher, make sure the active Python environment exposes the GPU ONNX Runtime provider:
 
 ```bash
-python -m pip install --extra-index-url https://pypi.nvidia.com "numpy>=1.26" "onnx>=1.16" "onnxruntime-gpu>=1.18" "onnxscript>=0.3" "safetensors>=0.4.5" "tensorrt>=10"
+python - <<'PY'
+import sys
+import torch
+import onnxruntime as ort
+print("python:", sys.executable)
+print("torch cuda:", torch.version.cuda, torch.cuda.is_available(), torch.cuda.device_count())
+print("onnxruntime:", ort.__version__, ort.__file__)
+print("providers:", ort.get_available_providers())
+PY
+```
+
+The provider list must include `CUDAExecutionProvider`. If it only shows `AzureExecutionProvider` and `CPUExecutionProvider`, that environment is using CPU-only ONNX Runtime or a conflicting install. Fix it in the same conda environment with:
+
+```bash
+python -m pip uninstall -y onnxruntime onnxruntime-gpu
+python -m pip install --extra-index-url https://pypi.nvidia.com "onnxruntime-gpu[cuda,cudnn]>=1.19" "optimum[onnxruntime-gpu]>=1.23" "onnx>=1.16" "onnxscript>=0.3" "safetensors>=0.4.5" "tensorrt>=10"
 ```
 
 The native TensorRT benchmark also needs NVIDIA `trtexec` on `PATH`; check it with `trtexec --version`. If `trtexec` is missing, install TensorRT from NVIDIA packages or use an NVIDIA TensorRT container before running `scripts/run_h20_encoder_decoder_sft_prune_trt24.sh`.
