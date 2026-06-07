@@ -22,8 +22,12 @@ Useful overrides:
   ACCURACY_SHARD_PARALLELISM=8
   ACCURACY_SHARD_STREAM_LOGS=1
   ONNX_DISABLE_IO_BINDING=1
+  NUM_BEAMS=1
+  NUM_RETURN_SEQUENCES=1
+  MAX_NEW_TOKENS=64
   MAX_TRAIN_EXAMPLES=0
   MAX_BENCHMARK_EXAMPLES=200
+  ACCURACY_ONLY=1 with OUTPUT_ROOT=<existing-run> reuses existing checkpoints/ONNX exports.
 
 Final report:
   <OUTPUT_ROOT>/all_deployment_em_latency_report.json
@@ -36,6 +40,13 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 fi
 
 cd "$(dirname "$0")/.."
+
+truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|y|Y|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 BASE_MODEL="${1:-charent/ChatLM-mini-Chinese}"
 if [[ $# -gt 0 ]]; then
@@ -53,6 +64,10 @@ export ACCURACY_SHARD_PARALLELISM="${ACCURACY_SHARD_PARALLELISM:-8}"
 export ACCURACY_SHARD_RETRIES="${ACCURACY_SHARD_RETRIES:-1}"
 export ACCURACY_SHARD_STREAM_LOGS="${ACCURACY_SHARD_STREAM_LOGS:-1}"
 export MAX_TRAIN_EXAMPLES="${MAX_TRAIN_EXAMPLES:-0}"
+export MAX_BENCHMARK_EXAMPLES="${MAX_BENCHMARK_EXAMPLES:-200}"
+export NUM_BEAMS="${NUM_BEAMS:-1}"
+export NUM_RETURN_SEQUENCES="${NUM_RETURN_SEQUENCES:-1}"
+export MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-64}"
 
 export FINETUNE_MODE="${FINETUNE_MODE:-contrastive}"
 export FINETUNE_TRAIN_JSON="${FINETUNE_TRAIN_JSON:-data/SCENIC_full_anchor_positive_negative.json}"
@@ -75,10 +90,17 @@ export ONNX_DISABLE_IO_BINDING="${ONNX_DISABLE_IO_BINDING:-1}"
 export ONNX_OPSET="${ONNX_OPSET:-18}"
 export ALIGN_TOKENIZER_EMBEDDINGS="${ALIGN_TOKENIZER_EMBEDDINGS:-1}"
 
-export FORCE_TRAIN="${FORCE_TRAIN:-1}"
-export FORCE_PRUNE="${FORCE_PRUNE:-1}"
-export FORCE_EXPORT="${FORCE_EXPORT:-1}"
-export FORCE_QUANTIZE="${FORCE_QUANTIZE:-1}"
+if truthy "${ACCURACY_ONLY:-0}"; then
+  export FORCE_TRAIN="${FORCE_TRAIN:-0}"
+  export FORCE_PRUNE="${FORCE_PRUNE:-0}"
+  export FORCE_EXPORT="${FORCE_EXPORT:-0}"
+  export FORCE_QUANTIZE="${FORCE_QUANTIZE:-0}"
+else
+  export FORCE_TRAIN="${FORCE_TRAIN:-1}"
+  export FORCE_PRUNE="${FORCE_PRUNE:-1}"
+  export FORCE_EXPORT="${FORCE_EXPORT:-1}"
+  export FORCE_QUANTIZE="${FORCE_QUANTIZE:-1}"
+fi
 export FORCE_ACCURACY="${FORCE_ACCURACY:-1}"
 
 exec bash scripts/run_onnx_precision_prune_eval.sh "$BASE_MODEL" "$@"

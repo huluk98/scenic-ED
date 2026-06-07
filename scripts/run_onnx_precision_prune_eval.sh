@@ -61,6 +61,10 @@ Accuracy:
   NUM_RETURN_SEQUENCES=5
   MAX_INPUT_LEN=256
   MAX_NEW_TOKENS=128
+  RUN_ONNX_FP16_DENSE_ACCURACY=1
+  RUN_ONNX_FP16_PRUNED_ACCURACY=1
+  RUN_ONNX_INT8_DENSE_ACCURACY=1
+  RUN_ONNX_INT8_PRUNED_ACCURACY=1
   RUN_PYTORCH_ACCURACY=1
   RUN_ACCURACY_PARALLEL=1
   RUN_ACCURACY_SHARDED=0
@@ -176,6 +180,10 @@ INCLUDE_PREDICTIONS="${INCLUDE_PREDICTIONS:-1}"
 IGNORE_SPACES="${IGNORE_SPACES:-1}"
 FORCE_ACCURACY="${FORCE_ACCURACY:-0}"
 RUN_PYTORCH_ACCURACY="${RUN_PYTORCH_ACCURACY:-1}"
+RUN_ONNX_FP16_DENSE_ACCURACY="${RUN_ONNX_FP16_DENSE_ACCURACY:-1}"
+RUN_ONNX_FP16_PRUNED_ACCURACY="${RUN_ONNX_FP16_PRUNED_ACCURACY:-1}"
+RUN_ONNX_INT8_DENSE_ACCURACY="${RUN_ONNX_INT8_DENSE_ACCURACY:-1}"
+RUN_ONNX_INT8_PRUNED_ACCURACY="${RUN_ONNX_INT8_PRUNED_ACCURACY:-1}"
 RUN_ACCURACY_PARALLEL="${RUN_ACCURACY_PARALLEL:-1}"
 RUN_ACCURACY_SHARDED="${RUN_ACCURACY_SHARDED:-0}"
 ACCURACY_SHARD_PARALLELISM="${ACCURACY_SHARD_PARALLELISM:-0}"
@@ -992,6 +1000,62 @@ def disable_ort_io_binding(model: Any) -> list[dict[str, Any]]:
     return changed
 
 
+def collect_ort_session_providers(model: Any) -> list[dict[str, Any]]:
+    providers: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    child_attrs = (
+        "encoder",
+        "decoder",
+        "decoder_with_past",
+        "encoder_model",
+        "decoder_model",
+        "decoder_with_past_model",
+        "model",
+        "_encoder",
+        "_decoder",
+        "_decoder_with_past",
+    )
+
+    def visit(name: str, obj: Any, depth: int = 0) -> None:
+        if obj is None or depth > 5:
+            return
+        obj_id = id(obj)
+        if obj_id in seen:
+            return
+        seen.add(obj_id)
+        get_providers = getattr(obj, "get_providers", None)
+        if callable(get_providers):
+            try:
+                providers.append({"path": name, "providers": list(get_providers())})
+            except Exception as exc:
+                providers.append({"path": name, "error": str(exc)})
+        for session_attr in ("session", "_session"):
+            try:
+                session = getattr(obj, session_attr)
+            except Exception:
+                continue
+            visit(f"{name}.{session_attr}", session, depth + 1)
+        for child_attr in child_attrs:
+            try:
+                child = getattr(obj, child_attr)
+            except Exception:
+                continue
+            visit(f"{name}.{child_attr}", child, depth + 1)
+        try:
+            sessions = getattr(obj, "sessions")
+        except Exception:
+            sessions = None
+        if isinstance(sessions, (list, tuple)):
+            for index, session in enumerate(sessions):
+                visit(f"{name}.sessions[{index}]", session, depth + 1)
+        elif isinstance(sessions, dict):
+            for key, session in sessions.items():
+                visit(f"{name}.sessions[{key!r}]", session, depth + 1)
+
+    visit("ort_model", model)
+    return providers
+
+
 def max_prompt_token_id(records: list[dict[str, Any]], tokenizer: Any, max_length: int) -> int:
     max_id = -1
     prompts: list[str] = []
@@ -1125,6 +1189,7 @@ engine_cache_dir: Path | None = None
 provider_options: dict[str, Any] | None = None
 onnx_disable_io_binding = runtime != "pytorch" and env_bool("ONNX_DISABLE_IO_BINDING", False)
 onnx_io_binding_disabled_paths: list[dict[str, Any]] = []
+onnx_session_providers: list[dict[str, Any]] = []
 if runtime == "pytorch":
     load_kwargs: dict[str, Any] = {
         "trust_remote_code": args.trust_remote_code,
@@ -1177,6 +1242,12 @@ elif runtime in {"onnx", "tensorrt"}:
     if onnx_disable_io_binding:
         onnx_io_binding_disabled_paths = disable_ort_io_binding(ort_model)
         print(f"ONNX_DISABLE_IO_BINDING=1; disabled Optimum IO binding on {len(onnx_io_binding_disabled_paths)} object(s).")
+    onnx_session_providers = collect_ort_session_providers(ort_model)
+    provider_lines = "; ".join(
+        f"{entry.get('path')}: {entry.get('providers', entry.get('error'))}"
+        for entry in onnx_session_providers
+    )
+    print(f"ONNX session providers: {provider_lines or 'not found'}")
     model = GenerateAdapter(ort_model)
 else:
     raise ValueError(f"Unknown runtime: {runtime}")
@@ -1223,6 +1294,7 @@ report = {
     "tokenizer_path": tokenizer_path,
     "onnx_provider": provider if runtime != "pytorch" else None,
     "onnx_provider_options": provider_options,
+    "onnx_session_providers": onnx_session_providers,
     "onnx_disable_io_binding": onnx_disable_io_binding if runtime != "pytorch" else None,
     "onnx_io_binding_disabled_paths": onnx_io_binding_disabled_paths,
     "model_or_engine_size_bytes": engine_size_bytes or path_size_bytes(source_path),
@@ -2215,6 +2287,7 @@ echo "Original model: $ORIGINAL_MODEL"
 echo "Fine-tune: ${FINETUNE_MODE}, ${FINETUNE_EPOCHS} epoch(s), train=${FINETUNE_TRAIN_JSON}"
 echo "Benchmark accuracy data: $BENCHMARK_JSON"
 echo "Deployment benchmark seq lengths: $LATENCY_SEQ_LENGTHS, batch=1"
+echo "Accuracy generation: beams=${NUM_BEAMS}, returns=${NUM_RETURN_SEQUENCES}, max_new_tokens=${MAX_NEW_TOKENS}, max_benchmark=${MAX_BENCHMARK_EXAMPLES}, max_train=${MAX_TRAIN_EXAMPLES:-full}"
 
 run_finetune
 repair_checkpoint_assets "$FINETUNED_CHECKPOINT_DIR" "$SOURCE_ASSET_DIR" "fine-tuned checkpoint"
@@ -2266,27 +2339,35 @@ else
   echo "RUN_PYTORCH_ACCURACY=0; skipping PyTorch dense/pruned accuracy generation."
 fi
 
-run_accuracy_eval \
-  "onnx_fp16_dense" \
-  "ONNX FP16 dense" \
-  "onnx" \
-  "$FP16_DENSE_ONNX" \
-  "$FINETUNED_CHECKPOINT_DIR" \
-  "$FP16_ONNX_PROVIDER" \
-  "fp16" \
-  "dense" \
-  "$REPORT_ROOT/onnx_fp16_dense_accuracy_report.json"
+if truthy "$RUN_ONNX_FP16_DENSE_ACCURACY"; then
+  run_accuracy_eval \
+    "onnx_fp16_dense" \
+    "ONNX FP16 dense" \
+    "onnx" \
+    "$FP16_DENSE_ONNX" \
+    "$FINETUNED_CHECKPOINT_DIR" \
+    "$FP16_ONNX_PROVIDER" \
+    "fp16" \
+    "dense" \
+    "$REPORT_ROOT/onnx_fp16_dense_accuracy_report.json"
+else
+  echo "RUN_ONNX_FP16_DENSE_ACCURACY=0; skipping ONNX FP16 dense accuracy generation."
+fi
 
-run_accuracy_eval \
-  "onnx_fp16_pruned" \
-  "ONNX FP16 ${PRUNED_PRETTY_LABEL}" \
-  "onnx" \
-  "$FP16_PRUNED_ONNX" \
-  "$PRUNED_CHECKPOINT_DIR" \
-  "$FP16_ONNX_PROVIDER" \
-  "fp16" \
-  "pruned" \
-  "$REPORT_ROOT/onnx_fp16_pruned_accuracy_report.json"
+if truthy "$RUN_ONNX_FP16_PRUNED_ACCURACY"; then
+  run_accuracy_eval \
+    "onnx_fp16_pruned" \
+    "ONNX FP16 ${PRUNED_PRETTY_LABEL}" \
+    "onnx" \
+    "$FP16_PRUNED_ONNX" \
+    "$PRUNED_CHECKPOINT_DIR" \
+    "$FP16_ONNX_PROVIDER" \
+    "fp16" \
+    "pruned" \
+    "$REPORT_ROOT/onnx_fp16_pruned_accuracy_report.json"
+else
+  echo "RUN_ONNX_FP16_PRUNED_ACCURACY=0; skipping ONNX FP16 pruned accuracy generation."
+fi
 
 if truthy "$RUN_TENSORRT"; then
   run_accuracy_eval \
@@ -2313,27 +2394,37 @@ if truthy "$RUN_TENSORRT"; then
 fi
 
 if truthy "$RUN_INT8"; then
-  run_accuracy_eval \
-    "onnx_int8_dense" \
-    "ONNX INT8 dense" \
-    "onnx" \
-    "$INT8_DENSE_ONNX" \
-    "$FINETUNED_CHECKPOINT_DIR" \
-    "$INT8_ONNX_PROVIDER" \
-    "int8" \
-    "dense" \
-    "$REPORT_ROOT/onnx_int8_dense_accuracy_report.json"
+  if truthy "$RUN_ONNX_INT8_DENSE_ACCURACY"; then
+    run_accuracy_eval \
+      "onnx_int8_dense" \
+      "ONNX INT8 dense" \
+      "onnx" \
+      "$INT8_DENSE_ONNX" \
+      "$FINETUNED_CHECKPOINT_DIR" \
+      "$INT8_ONNX_PROVIDER" \
+      "int8" \
+      "dense" \
+      "$REPORT_ROOT/onnx_int8_dense_accuracy_report.json"
+  else
+    echo "RUN_ONNX_INT8_DENSE_ACCURACY=0; skipping ONNX INT8 dense accuracy generation."
+  fi
 
-  run_accuracy_eval \
-    "onnx_int8_pruned" \
-    "ONNX INT8 ${PRUNED_PRETTY_LABEL}" \
-    "onnx" \
-    "$INT8_PRUNED_ONNX" \
-    "$PRUNED_CHECKPOINT_DIR" \
-    "$INT8_ONNX_PROVIDER" \
-    "int8" \
-    "pruned" \
-    "$REPORT_ROOT/onnx_int8_pruned_accuracy_report.json"
+  if truthy "$RUN_ONNX_INT8_PRUNED_ACCURACY"; then
+    run_accuracy_eval \
+      "onnx_int8_pruned" \
+      "ONNX INT8 ${PRUNED_PRETTY_LABEL}" \
+      "onnx" \
+      "$INT8_PRUNED_ONNX" \
+      "$PRUNED_CHECKPOINT_DIR" \
+      "$INT8_ONNX_PROVIDER" \
+      "int8" \
+      "pruned" \
+      "$REPORT_ROOT/onnx_int8_pruned_accuracy_report.json"
+  else
+    echo "RUN_ONNX_INT8_PRUNED_ACCURACY=0; skipping ONNX INT8 pruned accuracy generation."
+  fi
+else
+  echo "RUN_INT8=0; skipping ONNX INT8 accuracy generation."
 fi
 
 wait_accuracy_evals
