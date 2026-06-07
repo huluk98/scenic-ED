@@ -20,6 +20,7 @@ Useful overrides:
   LATENCY_QUERIES=5
   LATENCY_WARMUP=1
   LATENCY_MAX_NEW_TOKENS=32
+  ONNX_DISABLE_IO_BINDING=1
   RUN_INT8=1
 
 Outputs:
@@ -112,6 +113,7 @@ for gpu in "${gpu_ids[@]}"; do
 
     export RUN_INT8="${RUN_INT8:-1}"
     export RUN_TENSORRT="${RUN_TENSORRT:-0}"
+    export ONNX_DISABLE_IO_BINDING="${ONNX_DISABLE_IO_BINDING:-1}"
     export FP16_ONNX_PROVIDER="${FP16_ONNX_PROVIDER:-CUDAExecutionProvider}"
     export INT8_ONNX_PROVIDER="${INT8_ONNX_PROVIDER:-CUDAExecutionProvider}"
 

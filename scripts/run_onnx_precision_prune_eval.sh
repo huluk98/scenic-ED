@@ -1647,6 +1647,13 @@ benchmark_runtime() {
   PYTORCH_DEVICE="$PYTORCH_DEVICE" \
   FP16_ONNX_PROVIDER="$FP16_ONNX_PROVIDER" \
   INT8_ONNX_PROVIDER="$INT8_ONNX_PROVIDER" \
+  ONNX_DISABLE_IO_BINDING="$ONNX_DISABLE_IO_BINDING" \
+  ONNX_CUDA_DEVICE_ID="$ONNX_CUDA_DEVICE_ID" \
+  ONNX_CUDA_ARENA_EXTEND_STRATEGY="$ONNX_CUDA_ARENA_EXTEND_STRATEGY" \
+  ONNX_CUDA_DO_COPY_IN_DEFAULT_STREAM="$ONNX_CUDA_DO_COPY_IN_DEFAULT_STREAM" \
+  ONNX_CUDA_CUDNN_CONV_ALGO_SEARCH="$ONNX_CUDA_CUDNN_CONV_ALGO_SEARCH" \
+  ONNX_CUDA_ENABLE_CUDA_GRAPH="$ONNX_CUDA_ENABLE_CUDA_GRAPH" \
+  ONNX_CUDA_GPU_MEM_LIMIT="$ONNX_CUDA_GPU_MEM_LIMIT" \
   RUN_INT8="$RUN_INT8" \
   RUN_TENSORRT="$RUN_TENSORRT" \
   TENSORRT_ONNX_PROVIDER="$TENSORRT_ONNX_PROVIDER" \
@@ -1805,6 +1812,80 @@ def generation_token_limit_for(path: Path, tokenizer: Any) -> int:
     return len(tokenizer)
 
 
+def cuda_provider_options() -> dict[str, str]:
+    options = {
+        "device_id": os.environ.get("ONNX_CUDA_DEVICE_ID", "0"),
+        "arena_extend_strategy": os.environ.get("ONNX_CUDA_ARENA_EXTEND_STRATEGY", "kSameAsRequested"),
+        "do_copy_in_default_stream": os.environ.get("ONNX_CUDA_DO_COPY_IN_DEFAULT_STREAM", "1"),
+        "cudnn_conv_algo_search": os.environ.get("ONNX_CUDA_CUDNN_CONV_ALGO_SEARCH", "HEURISTIC"),
+        "enable_cuda_graph": os.environ.get("ONNX_CUDA_ENABLE_CUDA_GRAPH", "0"),
+    }
+    gpu_mem_limit = os.environ.get("ONNX_CUDA_GPU_MEM_LIMIT", "")
+    if gpu_mem_limit:
+        options["gpu_mem_limit"] = gpu_mem_limit
+    return options
+
+
+def disable_ort_io_binding(model: Any) -> list[dict[str, Any]]:
+    changed: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    child_attrs = (
+        "encoder",
+        "decoder",
+        "decoder_with_past",
+        "encoder_model",
+        "decoder_model",
+        "decoder_with_past_model",
+        "model",
+        "_encoder",
+        "_decoder",
+        "_decoder_with_past",
+    )
+
+    def visit(name: str, obj: Any, depth: int = 0) -> None:
+        if obj is None or depth > 5:
+            return
+        obj_id = id(obj)
+        if obj_id in seen:
+            return
+        seen.add(obj_id)
+        try:
+            previous = getattr(obj, "use_io_binding")
+        except Exception:
+            previous = None
+            has_io_binding = False
+        else:
+            has_io_binding = True
+        if has_io_binding:
+            try:
+                setattr(obj, "use_io_binding", False)
+                previous_json: Any = previous
+                if not isinstance(previous_json, (str, int, float, bool, type(None))):
+                    previous_json = repr(previous_json)
+                changed.append({"path": name, "previous": previous_json})
+            except Exception as exc:
+                changed.append({"path": name, "error": str(exc)})
+        for child_attr in child_attrs:
+            try:
+                child = getattr(obj, child_attr)
+            except Exception:
+                continue
+            visit(f"{name}.{child_attr}", child, depth + 1)
+        try:
+            sessions = getattr(obj, "sessions")
+        except Exception:
+            sessions = None
+        if isinstance(sessions, (list, tuple)):
+            for index, session in enumerate(sessions):
+                visit(f"{name}.sessions[{index}]", session, depth + 1)
+        elif isinstance(sessions, dict):
+            for key, session in sessions.items():
+                visit(f"{name}.sessions[{key!r}]", session, depth + 1)
+
+    visit("ort_model", model)
+    return changed
+
+
 class RuntimeModel:
     def __init__(self, runtime: str, source: Path, tokenizer_fallback: Path | None, provider: str | None, cache_dir: Path | None) -> None:
         self.runtime = runtime
@@ -1845,13 +1926,30 @@ class RuntimeModel:
                     "trt_engine_cache_enable": "1",
                     "trt_engine_cache_path": str(cache_dir),
                 }
-            self.model = ORTModelForSeq2SeqLM.from_pretrained(
-                str(source),
-                provider=provider,
-                provider_options=provider_options,
-                local_files_only=True,
-                trust_remote_code=env_bool("TRUST_REMOTE_CODE", True),
-            )
+            elif provider == "CUDAExecutionProvider":
+                provider_options = cuda_provider_options()
+            load_kwargs: dict[str, Any] = {
+                "provider": provider,
+                "provider_options": provider_options,
+                "local_files_only": True,
+                "trust_remote_code": env_bool("TRUST_REMOTE_CODE", True),
+            }
+            disable_io_binding = env_bool("ONNX_DISABLE_IO_BINDING", False)
+            if disable_io_binding:
+                load_kwargs["use_io_binding"] = False
+            try:
+                self.model = ORTModelForSeq2SeqLM.from_pretrained(str(source), **load_kwargs)
+            except TypeError as exc:
+                message = str(exc)
+                if "use_io_binding" not in load_kwargs:
+                    raise
+                if "use_io_binding" not in message and "unexpected keyword" not in message:
+                    raise
+                load_kwargs.pop("use_io_binding")
+                self.model = ORTModelForSeq2SeqLM.from_pretrained(str(source), **load_kwargs)
+            if disable_io_binding:
+                changed = disable_ort_io_binding(self.model)
+                print(f"ONNX_DISABLE_IO_BINDING=1 for latency; disabled Optimum IO binding on {len(changed)} object(s).")
         else:
             raise ValueError(f"Unknown runtime {runtime}")
 
