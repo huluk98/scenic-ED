@@ -64,6 +64,8 @@ Accuracy:
   RUN_PYTORCH_ACCURACY=1
   RUN_ACCURACY_PARALLEL=1
   RUN_ACCURACY_SHARDED=0
+  ACCURACY_SHARD_PARALLELISM=0 # 0 means all shard GPUs at once
+  ACCURACY_SHARD_RETRIES=1
   ACCURACY_GPU_IDS="0,1,2,3,4,5,6,7"
 
 Latency:
@@ -174,8 +176,18 @@ FORCE_ACCURACY="${FORCE_ACCURACY:-0}"
 RUN_PYTORCH_ACCURACY="${RUN_PYTORCH_ACCURACY:-1}"
 RUN_ACCURACY_PARALLEL="${RUN_ACCURACY_PARALLEL:-1}"
 RUN_ACCURACY_SHARDED="${RUN_ACCURACY_SHARDED:-0}"
+ACCURACY_SHARD_PARALLELISM="${ACCURACY_SHARD_PARALLELISM:-0}"
+ACCURACY_SHARD_RETRIES="${ACCURACY_SHARD_RETRIES:-1}"
+ACCURACY_SHARD_RETRY_DELAY_SECONDS="${ACCURACY_SHARD_RETRY_DELAY_SECONDS:-5}"
+ACCURACY_CUDA_LAUNCH_BLOCKING_ON_RETRY="${ACCURACY_CUDA_LAUNCH_BLOCKING_ON_RETRY:-1}"
 ACCURACY_GPU_IDS="${ACCURACY_GPU_IDS:-}"
 ACCURACY_PYTORCH_DEVICE="${ACCURACY_PYTORCH_DEVICE:-cuda}"
+ONNX_CUDA_DEVICE_ID="${ONNX_CUDA_DEVICE_ID:-0}"
+ONNX_CUDA_ARENA_EXTEND_STRATEGY="${ONNX_CUDA_ARENA_EXTEND_STRATEGY:-kSameAsRequested}"
+ONNX_CUDA_DO_COPY_IN_DEFAULT_STREAM="${ONNX_CUDA_DO_COPY_IN_DEFAULT_STREAM:-1}"
+ONNX_CUDA_CUDNN_CONV_ALGO_SEARCH="${ONNX_CUDA_CUDNN_CONV_ALGO_SEARCH:-HEURISTIC}"
+ONNX_CUDA_ENABLE_CUDA_GRAPH="${ONNX_CUDA_ENABLE_CUDA_GRAPH:-0}"
+ONNX_CUDA_GPU_MEM_LIMIT="${ONNX_CUDA_GPU_MEM_LIMIT:-}"
 
 LATENCY_SEQ_LENGTHS="${LATENCY_SEQ_LENGTHS:-64 128}"
 LATENCY_BATCH_SIZE="${LATENCY_BATCH_SIZE:-1}"
@@ -777,6 +789,12 @@ evaluate_accuracy_variant() {
   PYTORCH_DEVICE="$PYTORCH_DEVICE" \
   TENSORRT_ENGINE_CACHE_ROOT="$TENSORRT_ENGINE_CACHE_ROOT" \
   TENSORRT_SPARSITY_ENABLE="$TENSORRT_SPARSITY_ENABLE" \
+  ONNX_CUDA_DEVICE_ID="$ONNX_CUDA_DEVICE_ID" \
+  ONNX_CUDA_ARENA_EXTEND_STRATEGY="$ONNX_CUDA_ARENA_EXTEND_STRATEGY" \
+  ONNX_CUDA_DO_COPY_IN_DEFAULT_STREAM="$ONNX_CUDA_DO_COPY_IN_DEFAULT_STREAM" \
+  ONNX_CUDA_CUDNN_CONV_ALGO_SEARCH="$ONNX_CUDA_CUDNN_CONV_ALGO_SEARCH" \
+  ONNX_CUDA_ENABLE_CUDA_GRAPH="$ONNX_CUDA_ENABLE_CUDA_GRAPH" \
+  ONNX_CUDA_GPU_MEM_LIMIT="$ONNX_CUDA_GPU_MEM_LIMIT" \
   "$PYTHON" - "${ACCURACY_EXTRA_ARGS[@]}" <<'PY'
 from __future__ import annotations
 
@@ -841,6 +859,20 @@ def tokenizer_source(source_path: Path, fallback: str) -> str:
     if source_path.is_dir() and any((source_path / marker).exists() for marker in tokenizer_markers):
         return str(source_path)
     return fallback
+
+
+def cuda_provider_options() -> dict[str, str]:
+    options = {
+        "device_id": os.environ.get("ONNX_CUDA_DEVICE_ID", "0"),
+        "arena_extend_strategy": os.environ.get("ONNX_CUDA_ARENA_EXTEND_STRATEGY", "kSameAsRequested"),
+        "do_copy_in_default_stream": os.environ.get("ONNX_CUDA_DO_COPY_IN_DEFAULT_STREAM", "1"),
+        "cudnn_conv_algo_search": os.environ.get("ONNX_CUDA_CUDNN_CONV_ALGO_SEARCH", "HEURISTIC"),
+        "enable_cuda_graph": os.environ.get("ONNX_CUDA_ENABLE_CUDA_GRAPH", "0"),
+    }
+    gpu_mem_limit = os.environ.get("ONNX_CUDA_GPU_MEM_LIMIT", "")
+    if gpu_mem_limit:
+        options["gpu_mem_limit"] = gpu_mem_limit
+    return options
 
 
 class GenerateAdapter:
@@ -945,6 +977,8 @@ elif runtime in {"onnx", "tensorrt"}:
             "trt_engine_cache_enable": "1",
             "trt_engine_cache_path": str(engine_cache_dir),
         }
+    elif provider == "CUDAExecutionProvider":
+        provider_options = cuda_provider_options()
     ort_model = ORTModelForSeq2SeqLM.from_pretrained(
         str(source_path),
         provider=provider,
@@ -1162,6 +1196,7 @@ evaluate_accuracy_variant_sharded() {
   local pretty_label="$2"
   local runtime="$3"
   local report_json="$9"
+  local eval_args=("${@:1:8}")
 
   if [[ -f "$report_json" ]] && ! truthy "$FORCE_ACCURACY"; then
     echo "Skipping ${pretty_label} sharded accuracy; found ${report_json}"
@@ -1170,37 +1205,86 @@ evaluate_accuracy_variant_sharded() {
 
   local shard_dir="${report_json%.json}_shards"
   mkdir -p "$shard_dir"
-  local shard_pids=()
-  local shard_labels=()
   local shard_count="${#accuracy_gpu_ids[@]}"
+  local max_parallel="$ACCURACY_SHARD_PARALLELISM"
+  if [[ "$max_parallel" -le 0 || "$max_parallel" -gt "$shard_count" ]]; then
+    max_parallel="$shard_count"
+  fi
+  if [[ "$max_parallel" -lt 1 ]]; then
+    max_parallel=1
+  fi
+
+  local pending_indices=()
+  local retry_counts=()
   local shard_index
-
-  echo "Evaluating ${pretty_label} with ${shard_count} ONNX GPU shard(s) -> ${report_json}"
   for shard_index in "${!accuracy_gpu_ids[@]}"; do
-    local gpu="${accuracy_gpu_ids[$shard_index]}"
-    local shard_json="${shard_dir}/shard_${shard_index}.json"
-    (
-      export CUDA_VISIBLE_DEVICES="$gpu"
-      export PYTORCH_DEVICE="$ACCURACY_PYTORCH_DEVICE"
-      export ACCURACY_SHARD_INDEX="$shard_index"
-      export ACCURACY_SHARD_COUNT="$shard_count"
-      evaluate_accuracy_variant "${@:1:8}" "$shard_json"
-    ) &
-    shard_pids+=("$!")
-    shard_labels+=("${pretty_label} shard ${shard_index} gpu ${gpu}")
-  done
-
-  local status=0
-  local index
-  for index in "${!shard_pids[@]}"; do
-    if ! wait "${shard_pids[$index]}"; then
-      echo "Accuracy shard failed: ${shard_labels[$index]}" >&2
-      status=1
+    retry_counts[$shard_index]=0
+    if [[ -f "${shard_dir}/shard_${shard_index}.json" ]] && ! truthy "$FORCE_ACCURACY"; then
+      echo "Reusing completed ${pretty_label} shard ${shard_index}: ${shard_dir}/shard_${shard_index}.json"
+    else
+      pending_indices+=("$shard_index")
     fi
   done
-  if [[ "$status" -ne 0 ]]; then
-    return "$status"
-  fi
+
+  echo "Evaluating ${pretty_label} with ${shard_count} ONNX GPU shard(s), max ${max_parallel} active -> ${report_json}"
+
+  local running_pids=()
+  local running_indices=()
+  local running_labels=()
+  local running_logs=()
+  local status=0
+
+  while [[ "${#pending_indices[@]}" -gt 0 || "${#running_pids[@]}" -gt 0 ]]; do
+    while [[ "${#pending_indices[@]}" -gt 0 && "${#running_pids[@]}" -lt "$max_parallel" ]]; do
+      shard_index="${pending_indices[0]}"
+      pending_indices=("${pending_indices[@]:1}")
+      local gpu="${accuracy_gpu_ids[$shard_index]}"
+      local retry="${retry_counts[$shard_index]}"
+      local shard_json="${shard_dir}/shard_${shard_index}.json"
+      local shard_log="${shard_dir}/shard_${shard_index}.log"
+      echo "Starting ${pretty_label} shard ${shard_index}/${shard_count} on GPU ${gpu} (attempt $((retry + 1)))"
+      (
+        export CUDA_VISIBLE_DEVICES="$gpu"
+        export PYTORCH_DEVICE="$ACCURACY_PYTORCH_DEVICE"
+        export ACCURACY_SHARD_INDEX="$shard_index"
+        export ACCURACY_SHARD_COUNT="$shard_count"
+        if [[ "$retry" -gt 0 ]] && truthy "$ACCURACY_CUDA_LAUNCH_BLOCKING_ON_RETRY"; then
+          export CUDA_LAUNCH_BLOCKING=1
+        fi
+        evaluate_accuracy_variant "${eval_args[@]}" "$shard_json"
+      ) >"$shard_log" 2>&1 &
+      running_pids+=("$!")
+      running_indices+=("$shard_index")
+      running_labels+=("${pretty_label} shard ${shard_index} gpu ${gpu}")
+      running_logs+=("$shard_log")
+    done
+
+    local pid="${running_pids[0]}"
+    local finished_index="${running_indices[0]}"
+    local finished_label="${running_labels[0]}"
+    local finished_log="${running_logs[0]}"
+    running_pids=("${running_pids[@]:1}")
+    running_indices=("${running_indices[@]:1}")
+    running_labels=("${running_labels[@]:1}")
+    running_logs=("${running_logs[@]:1}")
+
+    if wait "$pid"; then
+      echo "Completed ${finished_label}; log=${finished_log}"
+    else
+      echo "Accuracy shard failed: ${finished_label}; log=${finished_log}" >&2
+      tail -n 40 "$finished_log" >&2 || true
+      retry_counts[$finished_index]=$((retry_counts[$finished_index] + 1))
+      if [[ "${retry_counts[$finished_index]}" -le "$ACCURACY_SHARD_RETRIES" ]]; then
+        echo "Retrying ${finished_label} after ${ACCURACY_SHARD_RETRY_DELAY_SECONDS}s" >&2
+        sleep "$ACCURACY_SHARD_RETRY_DELAY_SECONDS"
+        pending_indices+=("$finished_index")
+      else
+        status=1
+      fi
+    fi
+  done
+
+  [[ "$status" -eq 0 ]] || return "$status"
 
   aggregate_accuracy_shards "$label" "$pretty_label" "$report_json" "$shard_dir"
 }
@@ -1915,7 +1999,7 @@ fi
 
 prepare_accuracy_gpus
 if truthy "$RUN_ACCURACY_SHARDED" && [[ "${#accuracy_gpu_ids[@]}" -gt 1 ]]; then
-  echo "ONNX accuracy evals will be sharded across GPUs: ${accuracy_gpu_ids[*]}"
+  echo "ONNX accuracy evals will be sharded across GPUs: ${accuracy_gpu_ids[*]} (parallelism=${ACCURACY_SHARD_PARALLELISM})"
 elif truthy "$RUN_ACCURACY_PARALLEL" && [[ "${#accuracy_gpu_ids[@]}" -gt 1 ]]; then
   echo "Accuracy evals will run in parallel across GPUs: ${accuracy_gpu_ids[*]}"
 else
