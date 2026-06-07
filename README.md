@@ -28,10 +28,12 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 NPROC_PER_NODE=8 \
 ACCURACY_GPU_IDS=0,1,2,3,4,5,6,7 \
 FP16_ONNX_PROVIDER=CUDAExecutionProvider \
+RUN_PYTORCH_ACCURACY=0 \
+RUN_RUNTIME_BENCHMARK=0 \
 bash scripts/run_gradient50_onnx_quant_baseline.sh charent/ChatLM-mini-Chinese
 ```
 
-ONNX FP16 should use `CUDAExecutionProvider`. Dynamic ONNX INT8 may still be slower or fall back because CUDA EP does not accelerate every quantized operator. If you only need benchmark accuracy and want to skip full training-data EM, add `MAX_TRAIN_EXAMPLES=0` to the command.
+ONNX FP16 should use `CUDAExecutionProvider`. `RUN_PYTORCH_ACCURACY=0` skips the slow PyTorch dense/pruned generation rows, and `RUN_RUNTIME_BENCHMARK=0` skips latency/TPS. Dynamic ONNX INT8 may still be slower or fall back because CUDA EP does not accelerate every quantized operator. If you only need benchmark accuracy and want to skip full training-data EM, add `MAX_TRAIN_EXAMPLES=0` to the command.
 
 SCENIC edge-device training utilities and compact dataset artifacts for ChatLM-mini-Chinese SFT experiments.
 

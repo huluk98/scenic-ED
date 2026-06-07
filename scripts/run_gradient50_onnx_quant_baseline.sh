@@ -14,8 +14,7 @@ This launcher builds the sparse quantized ASIC baseline:
   2. Create the 50% gradient one-shot pruned checkpoint.
   3. Export dense and gradient-pruned checkpoints to ONNX FP16.
   4. Export FP32 ONNX sources and dynamic-quantize them to ONNX INT8.
-  5. Evaluate PyTorch FP16, ONNX FP16, and ONNX INT8 on benchmark/training EM1/EM5.
-  6. Benchmark isolated latency, p95 latency, TPS, peak memory, and model size.
+  5. Evaluate ONNX FP16 and ONNX INT8 on benchmark/training EM1/EM5.
 
 Useful overrides:
   OUTPUT_ROOT=onnx_eval_outputs/gradient50_asic_baseline
@@ -23,8 +22,8 @@ Useful overrides:
   ACCURACY_GPU_IDS=0,1,2,3,4,5,6,7
   MAX_BENCHMARK_EXAMPLES=200
   MAX_TRAIN_EXAMPLES=
-  LATENCY_QUERIES=200
-  LATENCY_SEQ_LENGTHS="64 128"
+  RUN_PYTORCH_ACCURACY=1
+  RUN_RUNTIME_BENCHMARK=1
   INT8_ONNX_PROVIDER=CUDAExecutionProvider
 
 Final report:
@@ -51,6 +50,8 @@ export PRUNED_PRETTY_LABEL="${PRUNED_PRETTY_LABEL:-50% gradient pruned}"
 export RUN_INT8="${RUN_INT8:-1}"
 export RUN_TENSORRT="${RUN_TENSORRT:-0}"
 export TENSORRT_SPARSITY_ENABLE="${TENSORRT_SPARSITY_ENABLE:-0}"
+export RUN_PYTORCH_ACCURACY="${RUN_PYTORCH_ACCURACY:-0}"
+export RUN_RUNTIME_BENCHMARK="${RUN_RUNTIME_BENCHMARK:-0}"
 export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 export TRAIN_NPROC_PER_NODE="${TRAIN_NPROC_PER_NODE:-$NPROC_PER_NODE}"
 export RUN_ACCURACY_PARALLEL="${RUN_ACCURACY_PARALLEL:-1}"

@@ -61,6 +61,7 @@ Accuracy:
   NUM_RETURN_SEQUENCES=5
   MAX_INPUT_LEN=256
   MAX_NEW_TOKENS=128
+  RUN_PYTORCH_ACCURACY=1
   RUN_ACCURACY_PARALLEL=1
   ACCURACY_GPU_IDS="0,1,2,3,4,5,6,7"
 
@@ -71,6 +72,7 @@ Latency:
   LATENCY_WARMUP=10
   LATENCY_NUM_BEAMS=1
   LATENCY_MAX_NEW_TOKENS=128
+  RUN_RUNTIME_BENCHMARK=1
 
 TensorRT:
   RUN_TENSORRT=0        # default: do not run TensorRT on non-TensorRT machines
@@ -168,6 +170,7 @@ MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-128}"
 INCLUDE_PREDICTIONS="${INCLUDE_PREDICTIONS:-1}"
 IGNORE_SPACES="${IGNORE_SPACES:-1}"
 FORCE_ACCURACY="${FORCE_ACCURACY:-0}"
+RUN_PYTORCH_ACCURACY="${RUN_PYTORCH_ACCURACY:-1}"
 RUN_ACCURACY_PARALLEL="${RUN_ACCURACY_PARALLEL:-1}"
 ACCURACY_GPU_IDS="${ACCURACY_GPU_IDS:-}"
 ACCURACY_PYTORCH_DEVICE="${ACCURACY_PYTORCH_DEVICE:-cuda}"
@@ -178,6 +181,7 @@ LATENCY_QUERIES="${LATENCY_QUERIES:-200}"
 LATENCY_WARMUP="${LATENCY_WARMUP:-10}"
 LATENCY_NUM_BEAMS="${LATENCY_NUM_BEAMS:-1}"
 LATENCY_MAX_NEW_TOKENS="${LATENCY_MAX_NEW_TOKENS:-128}"
+RUN_RUNTIME_BENCHMARK="${RUN_RUNTIME_BENCHMARK:-1}"
 FORCE_BENCHMARK="${FORCE_BENCHMARK:-0}"
 
 LOCAL_FILES_ONLY="${LOCAL_FILES_ONLY:-0}"
@@ -1513,6 +1517,7 @@ write_final_report() {
   REPORT_ROOT="$REPORT_ROOT" \
   RUN_INT8="$RUN_INT8" \
   RUN_TENSORRT="$RUN_TENSORRT" \
+  RUN_PYTORCH_ACCURACY="$RUN_PYTORCH_ACCURACY" \
   "$PYTHON" <<'PY'
 from __future__ import annotations
 
@@ -1544,12 +1549,20 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 report_root = Path(os.environ["REPORT_ROOT"])
 pruned_label = os.environ["PRUNED_PRETTY_LABEL"]
-accuracy_specs = [
-    ("pytorch_fp16_dense", "PyTorch FP16 dense", report_root / "pytorch_fp16_dense_accuracy_report.json"),
-    ("pytorch_fp16_pruned", f"PyTorch FP16 {pruned_label}", report_root / "pytorch_fp16_pruned_accuracy_report.json"),
+accuracy_specs = []
+if env_bool("RUN_PYTORCH_ACCURACY", True):
+    accuracy_specs.extend(
+        [
+            ("pytorch_fp16_dense", "PyTorch FP16 dense", report_root / "pytorch_fp16_dense_accuracy_report.json"),
+            ("pytorch_fp16_pruned", f"PyTorch FP16 {pruned_label}", report_root / "pytorch_fp16_pruned_accuracy_report.json"),
+        ]
+    )
+accuracy_specs.extend(
+    [
     ("onnx_fp16_dense", "ONNX FP16 dense", report_root / "onnx_fp16_dense_accuracy_report.json"),
     ("onnx_fp16_pruned", f"ONNX FP16 {pruned_label}", report_root / "onnx_fp16_pruned_accuracy_report.json"),
-]
+    ]
+)
 if env_bool("RUN_TENSORRT", False):
     accuracy_specs.extend(
         [
@@ -1601,11 +1614,12 @@ for key, label, path in accuracy_specs:
             }
         )
 
-baseline_by_dataset = {
-    row["dataset"]: row
-    for row in accuracy_table
-    if row["variant"] == "pytorch_fp16_dense"
-}
+baseline_variant = "pytorch_fp16_dense" if env_bool("RUN_PYTORCH_ACCURACY", True) else "onnx_fp16_dense"
+if not any(row["variant"] == baseline_variant for row in accuracy_table):
+    baseline_variant = "onnx_fp16_dense"
+if not any(row["variant"] == baseline_variant for row in accuracy_table):
+    baseline_variant = "pytorch_fp16_dense"
+baseline_by_dataset = {row["dataset"]: row for row in accuracy_table if row["variant"] == baseline_variant}
 accuracy_delta_table: list[dict[str, Any]] = []
 for row in accuracy_table:
     baseline = baseline_by_dataset.get(row["dataset"])
@@ -1614,7 +1628,7 @@ for row in accuracy_table:
     accuracy_delta_table.append(
         {
             **row,
-            "baseline_variant": "pytorch_fp16_dense",
+            "baseline_variant": baseline_variant,
             "delta_em1_percent": row["em1_percent"] - baseline["em1_percent"],
             "delta_em5_percent": row["em5_percent"] - baseline["em5_percent"],
             "retention_em1_percent": (
@@ -1713,27 +1727,31 @@ else
   echo "Accuracy evals will run sequentially."
 fi
 
-run_accuracy_eval \
-  "pytorch_fp16_dense" \
-  "PyTorch FP16 dense" \
-  "pytorch" \
-  "$FINETUNED_CHECKPOINT_DIR" \
-  "$FINETUNED_CHECKPOINT_DIR" \
-  "" \
-  "fp16" \
-  "dense" \
-  "$REPORT_ROOT/pytorch_fp16_dense_accuracy_report.json"
+if truthy "$RUN_PYTORCH_ACCURACY"; then
+  run_accuracy_eval \
+    "pytorch_fp16_dense" \
+    "PyTorch FP16 dense" \
+    "pytorch" \
+    "$FINETUNED_CHECKPOINT_DIR" \
+    "$FINETUNED_CHECKPOINT_DIR" \
+    "" \
+    "fp16" \
+    "dense" \
+    "$REPORT_ROOT/pytorch_fp16_dense_accuracy_report.json"
 
-run_accuracy_eval \
-  "pytorch_fp16_pruned" \
-  "PyTorch FP16 ${PRUNED_PRETTY_LABEL}" \
-  "pytorch" \
-  "$PRUNED_CHECKPOINT_DIR" \
-  "$PRUNED_CHECKPOINT_DIR" \
-  "" \
-  "fp16" \
-  "pruned" \
-  "$REPORT_ROOT/pytorch_fp16_pruned_accuracy_report.json"
+  run_accuracy_eval \
+    "pytorch_fp16_pruned" \
+    "PyTorch FP16 ${PRUNED_PRETTY_LABEL}" \
+    "pytorch" \
+    "$PRUNED_CHECKPOINT_DIR" \
+    "$PRUNED_CHECKPOINT_DIR" \
+    "" \
+    "fp16" \
+    "pruned" \
+    "$REPORT_ROOT/pytorch_fp16_pruned_accuracy_report.json"
+else
+  echo "RUN_PYTORCH_ACCURACY=0; skipping PyTorch dense/pruned accuracy generation."
+fi
 
 run_accuracy_eval \
   "onnx_fp16_dense" \
@@ -1806,7 +1824,11 @@ if truthy "$RUN_INT8"; then
 fi
 
 wait_accuracy_evals
-benchmark_runtime
+if truthy "$RUN_RUNTIME_BENCHMARK"; then
+  benchmark_runtime
+else
+  echo "RUN_RUNTIME_BENCHMARK=0; skipping latency/TPS benchmark."
+fi
 write_final_report
 
 echo "Done. Final deployment report: $FINAL_JSON"
