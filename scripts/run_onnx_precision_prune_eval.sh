@@ -63,6 +63,7 @@ Accuracy:
   MAX_NEW_TOKENS=128
   RUN_PYTORCH_ACCURACY=1
   RUN_ACCURACY_PARALLEL=1
+  RUN_ACCURACY_SHARDED=0
   ACCURACY_GPU_IDS="0,1,2,3,4,5,6,7"
 
 Latency:
@@ -172,6 +173,7 @@ IGNORE_SPACES="${IGNORE_SPACES:-1}"
 FORCE_ACCURACY="${FORCE_ACCURACY:-0}"
 RUN_PYTORCH_ACCURACY="${RUN_PYTORCH_ACCURACY:-1}"
 RUN_ACCURACY_PARALLEL="${RUN_ACCURACY_PARALLEL:-1}"
+RUN_ACCURACY_SHARDED="${RUN_ACCURACY_SHARDED:-0}"
 ACCURACY_GPU_IDS="${ACCURACY_GPU_IDS:-}"
 ACCURACY_PYTORCH_DEVICE="${ACCURACY_PYTORCH_DEVICE:-cuda}"
 
@@ -959,6 +961,21 @@ benchmark_records = truncate_records(
     read_records(Path(args.benchmark_json).expanduser()),
     args.max_benchmark_examples,
 )
+shard_index = env_int_or_none("ACCURACY_SHARD_INDEX")
+shard_count = env_int_or_none("ACCURACY_SHARD_COUNT") or 1
+if shard_index is None:
+    shard_index = 0
+if shard_count < 1:
+    raise ValueError("ACCURACY_SHARD_COUNT must be >= 1.")
+if shard_index < 0 or shard_index >= shard_count:
+    raise ValueError("ACCURACY_SHARD_INDEX must be between 0 and ACCURACY_SHARD_COUNT - 1.")
+full_dataset_totals = {
+    "benchmark": len(benchmark_records),
+    "training": len(train_records),
+}
+if shard_count > 1:
+    benchmark_records = benchmark_records[shard_index::shard_count]
+    train_records = train_records[shard_index::shard_count]
 datasets = {
     "benchmark": benchmark_records,
     "training": train_records,
@@ -988,8 +1005,22 @@ report = {
         "batch_size": args.eval_batch_size,
     },
     "datasets": {
-        "benchmark": {"path": str(Path(args.benchmark_json).expanduser()), "total": len(benchmark_records)},
-        "training": {"path": str(Path(args.train_json).expanduser()), "total": len(train_records)},
+        "benchmark": {
+            "path": str(Path(args.benchmark_json).expanduser()),
+            "total": full_dataset_totals["benchmark"],
+            "shard_total": len(benchmark_records),
+        },
+        "training": {
+            "path": str(Path(args.train_json).expanduser()),
+            "total": full_dataset_totals["training"],
+            "shard_total": len(train_records),
+        },
+    },
+    "shard": {
+        "enabled": shard_count > 1,
+        "index": shard_index,
+        "count": shard_count,
+        "full_dataset_totals": full_dataset_totals,
     },
     "model": model_summary,
     "summary": {
@@ -1018,9 +1049,171 @@ prepare_accuracy_gpus() {
   fi
 }
 
+aggregate_accuracy_shards() {
+  local label="$1"
+  local pretty_label="$2"
+  local report_json="$3"
+  local shard_dir="$4"
+
+  VARIANT_LABEL="$label" \
+  VARIANT_PRETTY_LABEL="$pretty_label" \
+  REPORT_JSON="$report_json" \
+  SHARD_DIR="$shard_dir" \
+  "$PYTHON" <<'PY'
+from __future__ import annotations
+
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as handle:
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} must contain a JSON object.")
+    return value
+
+
+def finalize(result: dict[str, Any]) -> dict[str, Any]:
+    total = int(result["total"])
+    em1_correct = int(result["em1_correct"])
+    em5_correct = int(result["em5_correct"])
+    em1 = em1_correct / total if total else 0.0
+    em5 = em5_correct / total if total else 0.0
+    return {
+        "total": total,
+        "em1_correct": em1_correct,
+        "em5_correct": em5_correct,
+        "em1": em1,
+        "em5": em5,
+        "em1_percent": em1 * 100.0,
+        "em5_percent": em5 * 100.0,
+        "accuracy": em1,
+        "accuracy_percent": em1 * 100.0,
+        "accuracy_definition": "accuracy is exact-match@1 / EM@1",
+        "outputs": result.get("outputs", []),
+    }
+
+
+def compact(results: dict[str, Any]) -> dict[str, Any]:
+    return {
+        dataset: {
+            "total": metrics["total"],
+            "em1": metrics["em1"],
+            "em5": metrics["em5"],
+            "em1_percent": metrics["em1_percent"],
+            "em5_percent": metrics["em5_percent"],
+            "accuracy": metrics["accuracy"],
+            "accuracy_percent": metrics["accuracy_percent"],
+        }
+        for dataset, metrics in results.items()
+    }
+
+
+shard_dir = Path(os.environ["SHARD_DIR"])
+report_json = Path(os.environ["REPORT_JSON"])
+shard_paths = sorted(shard_dir.glob("shard_*.json"))
+if not shard_paths:
+    raise SystemExit(f"No shard reports found in {shard_dir}")
+
+reports = [read_json(path) for path in shard_paths]
+base = reports[0]
+combined_results: dict[str, Any] = {}
+for dataset in ("benchmark", "training"):
+    merged = {"total": 0, "em1_correct": 0, "em5_correct": 0, "outputs": []}
+    for report in reports:
+        result = report.get("evaluations", {}).get(dataset)
+        if not isinstance(result, dict):
+            continue
+        merged["total"] += int(result.get("total", 0))
+        merged["em1_correct"] += int(result.get("em1_correct", 0))
+        merged["em5_correct"] += int(result.get("em5_correct", 0))
+        merged["outputs"].extend(result.get("outputs", []))
+    combined_results[dataset] = finalize(merged)
+
+payload = {
+    **base,
+    "created_at": datetime.now(timezone.utc).isoformat(),
+    "variant": os.environ["VARIANT_LABEL"],
+    "variant_label": os.environ["VARIANT_PRETTY_LABEL"],
+    "report_json": str(report_json),
+    "sharded_accuracy_eval": {
+        "enabled": True,
+        "shard_count": len(reports),
+        "shard_reports": [str(path) for path in shard_paths],
+    },
+    "summary": {
+        "accuracy_definition": "accuracy is exact-match@1 / EM@1",
+        os.environ["VARIANT_LABEL"]: compact(combined_results),
+    },
+    "evaluations": combined_results,
+}
+report_json.parent.mkdir(parents=True, exist_ok=True)
+report_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+print(f"Wrote sharded accuracy report: {report_json}")
+PY
+}
+
+evaluate_accuracy_variant_sharded() {
+  local label="$1"
+  local pretty_label="$2"
+  local runtime="$3"
+  local report_json="$9"
+
+  if [[ -f "$report_json" ]] && ! truthy "$FORCE_ACCURACY"; then
+    echo "Skipping ${pretty_label} sharded accuracy; found ${report_json}"
+    return
+  fi
+
+  local shard_dir="${report_json%.json}_shards"
+  mkdir -p "$shard_dir"
+  local shard_pids=()
+  local shard_labels=()
+  local shard_count="${#accuracy_gpu_ids[@]}"
+  local shard_index
+
+  echo "Evaluating ${pretty_label} with ${shard_count} ONNX GPU shard(s) -> ${report_json}"
+  for shard_index in "${!accuracy_gpu_ids[@]}"; do
+    local gpu="${accuracy_gpu_ids[$shard_index]}"
+    local shard_json="${shard_dir}/shard_${shard_index}.json"
+    (
+      export CUDA_VISIBLE_DEVICES="$gpu"
+      export PYTORCH_DEVICE="$ACCURACY_PYTORCH_DEVICE"
+      export ACCURACY_SHARD_INDEX="$shard_index"
+      export ACCURACY_SHARD_COUNT="$shard_count"
+      evaluate_accuracy_variant "${@:1:8}" "$shard_json"
+    ) &
+    shard_pids+=("$!")
+    shard_labels+=("${pretty_label} shard ${shard_index} gpu ${gpu}")
+  done
+
+  local status=0
+  local index
+  for index in "${!shard_pids[@]}"; do
+    if ! wait "${shard_pids[$index]}"; then
+      echo "Accuracy shard failed: ${shard_labels[$index]}" >&2
+      status=1
+    fi
+  done
+  if [[ "$status" -ne 0 ]]; then
+    return "$status"
+  fi
+
+  aggregate_accuracy_shards "$label" "$pretty_label" "$report_json" "$shard_dir"
+}
+
 run_accuracy_eval() {
   local label="$1"
   local pretty_label="$2"
+  local runtime="$3"
+
+  if truthy "$RUN_ACCURACY_SHARDED" && [[ "$runtime" != "pytorch" ]] && [[ "${#accuracy_gpu_ids[@]}" -gt 1 ]]; then
+    evaluate_accuracy_variant_sharded "$@"
+    return
+  fi
 
   if truthy "$RUN_ACCURACY_PARALLEL" && [[ "${#accuracy_gpu_ids[@]}" -gt 1 ]]; then
     local gpu="${accuracy_gpu_ids[$((accuracy_gpu_index % ${#accuracy_gpu_ids[@]}))]}"
@@ -1721,7 +1914,9 @@ if truthy "$RUN_INT8"; then
 fi
 
 prepare_accuracy_gpus
-if truthy "$RUN_ACCURACY_PARALLEL" && [[ "${#accuracy_gpu_ids[@]}" -gt 1 ]]; then
+if truthy "$RUN_ACCURACY_SHARDED" && [[ "${#accuracy_gpu_ids[@]}" -gt 1 ]]; then
+  echo "ONNX accuracy evals will be sharded across GPUs: ${accuracy_gpu_ids[*]}"
+elif truthy "$RUN_ACCURACY_PARALLEL" && [[ "${#accuracy_gpu_ids[@]}" -gt 1 ]]; then
   echo "Accuracy evals will run in parallel across GPUs: ${accuracy_gpu_ids[*]}"
 else
   echo "Accuracy evals will run sequentially."

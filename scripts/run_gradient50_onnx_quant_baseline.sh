@@ -10,18 +10,21 @@ Default:
   base model: charent/ChatLM-mini-Chinese
 
 This launcher builds the sparse quantized ASIC baseline:
-  1. Fine-tune the base model for 5 epochs with regular SFT.
+  1. Fine-tune the base model for 5 epochs with contrastive SFT.
   2. Create the 50% gradient one-shot pruned checkpoint.
   3. Export dense and gradient-pruned checkpoints to ONNX FP16.
   4. Export FP32 ONNX sources and dynamic-quantize them to ONNX INT8.
   5. Evaluate ONNX FP16 and ONNX INT8 on benchmark/training EM1/EM5.
+     Accuracy eval is sharded across the configured GPU ids by default.
 
 Useful overrides:
-  OUTPUT_ROOT=onnx_eval_outputs/gradient50_asic_baseline
+  OUTPUT_ROOT=onnx_eval_outputs/contrastive_gradient50_asic_baseline
   NPROC_PER_NODE=8
   ACCURACY_GPU_IDS=0,1,2,3,4,5,6,7
+  RUN_ACCURACY_SHARDED=1
   MAX_BENCHMARK_EXAMPLES=200
   MAX_TRAIN_EXAMPLES=
+  FINETUNE_MODE=regular
   RUN_PYTORCH_ACCURACY=1
   RUN_RUNTIME_BENCHMARK=1
   INT8_ONNX_PROVIDER=CUDAExecutionProvider
@@ -43,10 +46,12 @@ if [[ $# -gt 0 ]]; then
   shift
 fi
 
+export FINETUNE_MODE="${FINETUNE_MODE:-contrastive}"
+export FINETUNE_TRAIN_JSON="${FINETUNE_TRAIN_JSON:-data/SCENIC_full_anchor_positive_negative.json}"
 export PRUNE_METHOD="${PRUNE_METHOD:-gradient}"
 export SPARSITY="${SPARSITY:-0.5}"
-export PRUNED_VARIANT="${PRUNED_VARIANT:-gradient50}"
-export PRUNED_PRETTY_LABEL="${PRUNED_PRETTY_LABEL:-50% gradient pruned}"
+export PRUNED_VARIANT="${PRUNED_VARIANT:-contrastive_gradient50}"
+export PRUNED_PRETTY_LABEL="${PRUNED_PRETTY_LABEL:-contrastive 50% gradient one-shot pruned}"
 export RUN_INT8="${RUN_INT8:-1}"
 export RUN_TENSORRT="${RUN_TENSORRT:-0}"
 export TENSORRT_SPARSITY_ENABLE="${TENSORRT_SPARSITY_ENABLE:-0}"
@@ -54,7 +59,8 @@ export RUN_PYTORCH_ACCURACY="${RUN_PYTORCH_ACCURACY:-0}"
 export RUN_RUNTIME_BENCHMARK="${RUN_RUNTIME_BENCHMARK:-0}"
 export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 export TRAIN_NPROC_PER_NODE="${TRAIN_NPROC_PER_NODE:-$NPROC_PER_NODE}"
-export RUN_ACCURACY_PARALLEL="${RUN_ACCURACY_PARALLEL:-1}"
+export RUN_ACCURACY_SHARDED="${RUN_ACCURACY_SHARDED:-1}"
+export RUN_ACCURACY_PARALLEL="${RUN_ACCURACY_PARALLEL:-0}"
 export ACCURACY_GPU_IDS="${ACCURACY_GPU_IDS:-0,1,2,3,4,5,6,7}"
 export INT8_ONNX_PROVIDER="${INT8_ONNX_PROVIDER:-CUDAExecutionProvider}"
 
