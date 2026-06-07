@@ -1,6 +1,14 @@
 # SCENIC ED
 
 ```bash
+git pull && OUTPUT_ROOT=onnx_eval_outputs/clean_h20_contrastive_gradient50_YYYYMMDD_HHMMSS ACCURACY_ONLY=1 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 ACCURACY_GPU_IDS=0,1,2,3,4,5,6,7 ACCURACY_SHARD_PARALLELISM=8 ACCURACY_SHARD_STREAM_LOGS=1 MAX_TRAIN_EXAMPLES=0 NUM_BEAMS=5 NUM_RETURN_SEQUENCES=5 MAX_NEW_TOKENS=128 SPLIT_EM1_EM5=1 ONNX_DISABLE_IO_BINDING=1 FP16_ONNX_PROVIDER=CUDAExecutionProvider INT8_ONNX_PROVIDER=CUDAExecutionProvider bash scripts/run_clean_h20_onnx_fp16_int8.sh charent/ChatLM-mini-Chinese
+```
+
+Replace `YYYYMMDD_HHMMSS` with the existing run folder. This top command reuses completed training/pruning/ONNX export and reruns accuracy only.
+
+For a fresh full run, omit `OUTPUT_ROOT=... ACCURACY_ONLY=1`:
+
+```bash
 git pull && CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NPROC_PER_NODE=8 ACCURACY_GPU_IDS=0,1,2,3,4,5,6,7 ACCURACY_SHARD_PARALLELISM=8 ACCURACY_SHARD_STREAM_LOGS=1 MAX_TRAIN_EXAMPLES=0 NUM_BEAMS=5 NUM_RETURN_SEQUENCES=5 MAX_NEW_TOKENS=128 SPLIT_EM1_EM5=1 ONNX_DISABLE_IO_BINDING=1 ONNX_OPSET=18 FP16_ONNX_PROVIDER=CUDAExecutionProvider INT8_ONNX_PROVIDER=CUDAExecutionProvider bash scripts/run_clean_h20_onnx_fp16_int8.sh charent/ChatLM-mini-Chinese
 ```
 
