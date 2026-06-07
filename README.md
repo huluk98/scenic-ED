@@ -6,6 +6,14 @@ git pull && OUTPUT_ROOT=onnx_eval_outputs/clean_h20_contrastive_gradient50_YYYYM
 
 Replace `YYYYMMDD_HHMMSS` with the existing run folder. This top command reuses completed training/pruning/ONNX export and reruns accuracy only.
 
+Latency/TPS test-drive only, one worker per GPU, no accuracy generation:
+
+```bash
+git pull && bash scripts/run_latency_testdrive_8gpu.sh onnx_eval_outputs/clean_h20_contrastive_gradient50_YYYYMMDD_HHMMSS charent/ChatLM-mini-Chinese
+```
+
+This smoke test defaults to `LATENCY_SEQ_LENGTHS=64 LATENCY_QUERIES=5 LATENCY_WARMUP=1 LATENCY_MAX_NEW_TOKENS=32`, skips PyTorch latency, and writes per-GPU JSON/log files under `<OUTPUT_ROOT>/reports/latency_testdrive_8gpu/`.
+
 For a fresh full run, omit `OUTPUT_ROOT=... ACCURACY_ONLY=1`:
 
 ```bash

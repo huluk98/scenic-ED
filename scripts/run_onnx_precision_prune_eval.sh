@@ -210,6 +210,7 @@ LATENCY_WARMUP="${LATENCY_WARMUP:-10}"
 LATENCY_NUM_BEAMS="${LATENCY_NUM_BEAMS:-1}"
 LATENCY_MAX_NEW_TOKENS="${LATENCY_MAX_NEW_TOKENS:-128}"
 RUN_RUNTIME_BENCHMARK="${RUN_RUNTIME_BENCHMARK:-1}"
+RUN_PYTORCH_RUNTIME_BENCHMARK="${RUN_PYTORCH_RUNTIME_BENCHMARK:-1}"
 FORCE_BENCHMARK="${FORCE_BENCHMARK:-0}"
 
 LOCAL_FILES_ONLY="${LOCAL_FILES_ONLY:-0}"
@@ -251,7 +252,7 @@ FP32_DENSE_ONNX="${INTERMEDIATE_ROOT}/sft5_fp32_dense_for_int8"
 FP32_PRUNED_ONNX="${INTERMEDIATE_ROOT}/sft5_fp32_pruned_for_int8"
 INT8_DENSE_ONNX="${ONNX_ROOT}/sft5_int8_dense"
 INT8_PRUNED_ONNX="${ONNX_ROOT}/sft5_int8_pruned"
-RUNTIME_BENCHMARK_JSON="${REPORT_ROOT}/deployment_runtime_benchmark.json"
+RUNTIME_BENCHMARK_JSON="${RUNTIME_BENCHMARK_JSON:-${REPORT_ROOT}/deployment_runtime_benchmark.json}"
 
 truthy() {
   case "${1:-0}" in
@@ -1641,6 +1642,7 @@ benchmark_runtime() {
   LATENCY_WARMUP="$LATENCY_WARMUP" \
   LATENCY_NUM_BEAMS="$LATENCY_NUM_BEAMS" \
   LATENCY_MAX_NEW_TOKENS="$LATENCY_MAX_NEW_TOKENS" \
+  RUN_PYTORCH_RUNTIME_BENCHMARK="$RUN_PYTORCH_RUNTIME_BENCHMARK" \
   TRUST_REMOTE_CODE="$TRUST_REMOTE_CODE" \
   PYTORCH_DEVICE="$PYTORCH_DEVICE" \
   FP16_ONNX_PROVIDER="$FP16_ONNX_PROVIDER" \
@@ -1901,27 +1903,34 @@ run_tensorrt = env_bool("RUN_TENSORRT", False)
 trt_sparse_enabled = env_bool("TENSORRT_SPARSITY_ENABLE", True)
 trt_cache_suffix = "sparse" if trt_sparse_enabled else "dense_tactics"
 
-variants = [
-    {
-        "model_variant": "dense",
-        "runtime": "pytorch",
-        "runtime_label": "PyTorch FP16",
-        "precision": "fp16",
-        "source": dense_checkpoint,
-        "tokenizer_fallback": None,
-        "provider": None,
-        "cache_dir": None,
-    },
-    {
-        "model_variant": "pruned",
-        "runtime": "pytorch",
-        "runtime_label": "PyTorch FP16",
-        "precision": "fp16",
-        "source": pruned_checkpoint,
-        "tokenizer_fallback": None,
-        "provider": None,
-        "cache_dir": None,
-    },
+variants = []
+if env_bool("RUN_PYTORCH_RUNTIME_BENCHMARK", True):
+    variants.extend(
+        [
+            {
+                "model_variant": "dense",
+                "runtime": "pytorch",
+                "runtime_label": "PyTorch FP16",
+                "precision": "fp16",
+                "source": dense_checkpoint,
+                "tokenizer_fallback": None,
+                "provider": None,
+                "cache_dir": None,
+            },
+            {
+                "model_variant": "pruned",
+                "runtime": "pytorch",
+                "runtime_label": "PyTorch FP16",
+                "precision": "fp16",
+                "source": pruned_checkpoint,
+                "tokenizer_fallback": None,
+                "provider": None,
+                "cache_dir": None,
+            },
+        ]
+    )
+variants.extend(
+    [
     {
         "model_variant": "dense",
         "runtime": "onnx",
@@ -1942,7 +1951,8 @@ variants = [
         "provider": os.environ["FP16_ONNX_PROVIDER"],
         "cache_dir": None,
     },
-]
+    ]
+)
 if run_int8:
     variants.extend(
         [
