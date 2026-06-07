@@ -871,6 +871,7 @@ if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
 
 model_summary: dict[str, Any] = {}
 engine_cache_dir: Path | None = None
+provider_options: dict[str, Any] | None = None
 if runtime == "pytorch":
     load_kwargs: dict[str, Any] = {
         "trust_remote_code": args.trust_remote_code,
@@ -885,7 +886,6 @@ if runtime == "pytorch":
     model_summary = summarize_model(torch_model, str(source_path))
     model = GenerateAdapter(torch_model, device=device)
 elif runtime in {"onnx", "tensorrt"}:
-    provider_options: dict[str, Any] | None = None
     if runtime == "tensorrt":
         trt_sparse_enabled = env_bool("TENSORRT_SPARSITY_ENABLE", True)
         engine_cache_dir = (
