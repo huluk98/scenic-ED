@@ -289,6 +289,40 @@ sys.exit(0 if "TensorrtExecutionProvider" in providers else 1)
 PY
 }
 
+check_onnx_provider_available() {
+  local provider="$1"
+  local label="$2"
+  if [[ -z "$provider" ]]; then
+    return
+  fi
+  "$PYTHON" - "$provider" "$label" <<'PY'
+from __future__ import annotations
+
+import sys
+
+import onnxruntime as ort
+
+provider = sys.argv[1]
+label = sys.argv[2]
+available = ort.get_available_providers()
+if provider in available:
+    raise SystemExit(0)
+
+print(
+    f"Requested {provider!r} for {label}, but ONNX Runtime only exposes: "
+    f"{', '.join(available) or '<none>'}.",
+    file=sys.stderr,
+)
+print(
+    "Install onnxruntime-gpu in the active environment, set the provider to an available "
+    "provider, or run the accuracy-only GPU path: "
+    "NPROC_PER_NODE=8 bash scripts/run_gradient50_accuracy_only_8gpu.sh charent/ChatLM-mini-Chinese",
+    file=sys.stderr,
+)
+raise SystemExit(2)
+PY
+}
+
 check_tools() {
   check_python_module torch
   check_python_module transformers
@@ -300,6 +334,10 @@ check_tools() {
   check_python_module optimum.onnxruntime
   check_python_module onnxruntime
   check_python_module onnxruntime.quantization
+  check_onnx_provider_available "$FP16_ONNX_PROVIDER" "ONNX FP16 export/eval"
+  if truthy "$RUN_INT8"; then
+    check_onnx_provider_available "$INT8_ONNX_PROVIDER" "ONNX INT8 eval"
+  fi
 
   if truthy "$RUN_TENSORRT"; then
     if ! check_tensorrt_provider; then

@@ -1,9 +1,9 @@
 # SCENIC ED
 
-Run the 50% gradient-pruned ONNX FP16/INT8 ASIC baseline:
+Run the 8-GPU 50% gradient-pruned accuracy-only baseline:
 
 ```bash
-NPROC_PER_NODE=8 ACCURACY_GPU_IDS=0,1,2,3,4,5,6,7 bash scripts/run_gradient50_onnx_quant_baseline.sh charent/ChatLM-mini-Chinese
+NPROC_PER_NODE=8 bash scripts/run_gradient50_accuracy_only_8gpu.sh charent/ChatLM-mini-Chinese
 ```
 
 SCENIC edge-device training utilities and compact dataset artifacts for ChatLM-mini-Chinese SFT experiments.
@@ -275,6 +275,14 @@ bash scripts/run_prune_eval_50.sh models/chatlm_scenic_triplet_sft
 The launcher writes one combined JSON report containing the original pre-prune EM@1/EM@5, the pruned EM@1/EM@5, benchmark results, full training-set results, model identity metadata, pruning stats, and predictions. By default it uses magnitude pruning and auto-detects available NVIDIA GPUs for evaluation.
 
 ### Gradient-50 ONNX Quantized Baseline
+
+If you only need the accuracy change from dense regular SFT to 50% gradient-pruned regular SFT, and your ONNX Runtime does not expose `CUDAExecutionProvider`, use the 8-GPU accuracy-only launcher:
+
+```bash
+NPROC_PER_NODE=8 bash scripts/run_gradient50_accuracy_only_8gpu.sh charent/ChatLM-mini-Chinese
+```
+
+It skips ONNX export, INT8, and latency/TPS entirely. The launcher writes `<OUTPUT_ROOT>/gradient50_accuracy_delta_summary.json` with dense EM@1/EM@5, gradient-50 EM@1/EM@5, deltas, retention, target sparsity, and whole-model sparsity. This is the fastest path when the goal is just benchmark/training accuracy preservation.
 
 For the sparse quantized ASIC baseline, run the one-command launcher from the original Hugging Face model:
 
