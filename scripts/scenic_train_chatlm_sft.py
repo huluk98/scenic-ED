@@ -646,6 +646,7 @@ def load_chatlm_stack(config: RegularSFTConfig, state: DistributedState) -> tupl
         model.float()
     if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
         tokenizer.pad_token = tokenizer.eos_token
+    ensure_token_embeddings_cover_tokenizer(model, tokenizer, state)
 
     model.to(device)
     if hasattr(model.config, "use_cache"):
@@ -671,6 +672,31 @@ def model_load_dtype(config: RegularSFTConfig, device: Any) -> Any | None:
 
 def pad_multiple(config: RegularSFTConfig) -> int | None:
     return 8 if config.fp16 or config.bf16 else None
+
+
+def ensure_token_embeddings_cover_tokenizer(model: Any, tokenizer: Any, state: DistributedState | None = None) -> None:
+    embedding = model.get_input_embeddings() if hasattr(model, "get_input_embeddings") else None
+    if embedding is None or not hasattr(embedding, "num_embeddings"):
+        return
+    tokenizer_size = len(tokenizer)
+    embedding_size = int(embedding.num_embeddings)
+    if tokenizer_size <= embedding_size:
+        return
+    message = (
+        "Tokenizer/model vocab mismatch detected before training; resizing token embeddings: "
+        f"tokenizer_size={tokenizer_size}, embedding_size={embedding_size}"
+    )
+    if state is not None:
+        rank0_print(state, message)
+    elif int(os.environ.get("RANK", "0")) == 0:
+        print(message, flush=True)
+    if not hasattr(model, "resize_token_embeddings"):
+        raise RuntimeError(f"Model class {type(model).__name__} does not support resize_token_embeddings.")
+    model.resize_token_embeddings(tokenizer_size)
+    if hasattr(model, "config"):
+        model.config.vocab_size = tokenizer_size
+    if getattr(model, "generation_config", None) is not None and hasattr(model.generation_config, "vocab_size"):
+        model.generation_config.vocab_size = tokenizer_size
 
 
 def raise_model_load_error(config: RegularSFTConfig, exc: Exception) -> None:
@@ -1174,6 +1200,7 @@ def train_regular_sft(config: RegularSFTConfig | None = None) -> Path:
     model = AutoModelForSeq2SeqLM.from_pretrained(config.model_name_or_path, **load_kwargs)
     if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
         tokenizer.pad_token = tokenizer.eos_token
+    ensure_token_embeddings_cover_tokenizer(model, tokenizer)
     if hasattr(model.config, "use_cache"):
         model.config.use_cache = False
 

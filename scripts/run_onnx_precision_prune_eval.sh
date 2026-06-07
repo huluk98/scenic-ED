@@ -67,6 +67,7 @@ Accuracy:
   ACCURACY_SHARD_PARALLELISM=0 # 0 means all shard GPUs at once
   ACCURACY_SHARD_RETRIES=1
   ACCURACY_GPU_IDS="0,1,2,3,4,5,6,7"
+  ALIGN_TOKENIZER_EMBEDDINGS=1
 
 Latency:
   LATENCY_SEQ_LENGTHS="64 128"
@@ -182,6 +183,7 @@ ACCURACY_SHARD_RETRY_DELAY_SECONDS="${ACCURACY_SHARD_RETRY_DELAY_SECONDS:-5}"
 ACCURACY_CUDA_LAUNCH_BLOCKING_ON_RETRY="${ACCURACY_CUDA_LAUNCH_BLOCKING_ON_RETRY:-1}"
 ACCURACY_GPU_IDS="${ACCURACY_GPU_IDS:-}"
 ACCURACY_PYTORCH_DEVICE="${ACCURACY_PYTORCH_DEVICE:-cuda}"
+ALIGN_TOKENIZER_EMBEDDINGS="${ALIGN_TOKENIZER_EMBEDDINGS:-1}"
 ONNX_CUDA_DEVICE_ID="${ONNX_CUDA_DEVICE_ID:-0}"
 ONNX_CUDA_ARENA_EXTEND_STRATEGY="${ONNX_CUDA_ARENA_EXTEND_STRATEGY:-kSameAsRequested}"
 ONNX_CUDA_DO_COPY_IN_DEFAULT_STREAM="${ONNX_CUDA_DO_COPY_IN_DEFAULT_STREAM:-1}"
@@ -478,6 +480,9 @@ repair_checkpoint_assets() {
   fi
   if truthy "$LOCAL_FILES_ONLY"; then
     repair_cmd+=(--local-files-only)
+  fi
+  if truthy "$ALIGN_TOKENIZER_EMBEDDINGS"; then
+    repair_cmd+=(--resize-token-embeddings)
   fi
 
   if [[ -d "$source_ref" ]]; then
@@ -818,6 +823,7 @@ from scenic_prune_eval import (  # noqa: E402
     DistributedState,
     compact_metrics,
     evaluate_all,
+    extract_prompt_response,
     read_records,
     summarize_model,
     truncate_records,
@@ -848,6 +854,9 @@ def path_size_bytes(path: Path) -> int:
 
 
 def tokenizer_source(source_path: Path, fallback: str) -> str:
+    fallback_path = Path(fallback).expanduser() if fallback else None
+    if fallback_path is not None and fallback_path.is_dir():
+        return str(fallback_path)
     tokenizer_markers = (
         "tokenizer_config.json",
         "tokenizer.json",
@@ -859,6 +868,29 @@ def tokenizer_source(source_path: Path, fallback: str) -> str:
     if source_path.is_dir() and any((source_path / marker).exists() for marker in tokenizer_markers):
         return str(source_path)
     return fallback
+
+
+def onnx_embedding_vocab_size(source_path: Path) -> int | None:
+    if not source_path.is_dir():
+        return None
+    try:
+        import onnx
+    except Exception:
+        return None
+    candidates: list[int] = []
+    for model_path in sorted(source_path.glob("*.onnx")):
+        try:
+            model = onnx.load(str(model_path), load_external_data=False)
+        except Exception:
+            continue
+        for initializer in model.graph.initializer:
+            name = initializer.name.lower()
+            if "embed_tokens" not in name and "shared" not in name:
+                continue
+            dims = list(initializer.dims)
+            if len(dims) == 2 and dims[0] > 0:
+                candidates.append(int(dims[0]))
+    return min(candidates) if candidates else None
 
 
 def cuda_provider_options() -> dict[str, str]:
@@ -873,6 +905,59 @@ def cuda_provider_options() -> dict[str, str]:
     if gpu_mem_limit:
         options["gpu_mem_limit"] = gpu_mem_limit
     return options
+
+
+def max_prompt_token_id(records: list[dict[str, Any]], tokenizer: Any, max_length: int) -> int:
+    max_id = -1
+    prompts: list[str] = []
+    for record in records:
+        prompt, _ = extract_prompt_response(record)
+        if prompt:
+            prompts.append(prompt)
+    for start in range(0, len(prompts), 64):
+        encoded = tokenizer(
+            prompts[start : start + 64],
+            padding=False,
+            truncation=True,
+            max_length=max_length,
+        )
+        for ids in encoded.get("input_ids", []):
+            if ids:
+                max_id = max(max_id, max(int(token_id) for token_id in ids))
+    return max_id
+
+
+def assert_token_ids_fit_embedding(
+    runtime: str,
+    source_path: Path,
+    tokenizer: Any,
+    datasets: dict[str, list[dict[str, Any]]],
+    max_length: int,
+) -> dict[str, Any]:
+    if runtime == "pytorch":
+        return {"checked": False, "reason": "pytorch runtime uses native embedding bounds checks"}
+    embedding_vocab_size = onnx_embedding_vocab_size(source_path)
+    if embedding_vocab_size is None:
+        return {"checked": False, "reason": "could not infer ONNX embedding vocab size"}
+    dataset_max_ids = {
+        dataset_name: max_prompt_token_id(records, tokenizer, max_length)
+        for dataset_name, records in datasets.items()
+    }
+    overall_max_id = max(dataset_max_ids.values(), default=-1)
+    if overall_max_id >= embedding_vocab_size:
+        raise RuntimeError(
+            "Tokenizer/model vocab mismatch before ONNX generation: "
+            f"max_prompt_token_id={overall_max_id}, embedding_vocab_size={embedding_vocab_size}, "
+            f"tokenizer_path={tokenizer_path}, source_path={source_path}. "
+            "This would crash ONNX Runtime CUDA Gather at embed_tokens. "
+            "Rerun with FORCE_TRAIN=1 FORCE_PRUNE=1 FORCE_EXPORT=1 so the repaired checkpoint "
+            "can resize token embeddings before ONNX export."
+        )
+    return {
+        "checked": True,
+        "embedding_vocab_size": embedding_vocab_size,
+        "dataset_max_prompt_token_id": dataset_max_ids,
+    }
 
 
 class GenerateAdapter:
@@ -1014,6 +1099,7 @@ datasets = {
     "benchmark": benchmark_records,
     "training": train_records,
 }
+tokenizer_embedding_check = assert_token_ids_fit_embedding(runtime, source_path, tokenizer, datasets, args.max_input_len)
 results = evaluate_all(model, tokenizer, datasets, args, state, label=os.environ["VARIANT_LABEL"])
 engine_size_bytes = path_size_bytes(engine_cache_dir) if engine_cache_dir is not None else 0
 report = {
@@ -1056,6 +1142,7 @@ report = {
         "count": shard_count,
         "full_dataset_totals": full_dataset_totals,
     },
+    "tokenizer_embedding_check": tokenizer_embedding_check,
     "model": model_summary,
     "summary": {
         "accuracy_definition": "accuracy is exact-match@1 / EM@1",

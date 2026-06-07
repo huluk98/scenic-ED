@@ -38,6 +38,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Resolve Hugging Face source assets from the local cache only.",
     )
+    parser.add_argument(
+        "--resize-token-embeddings",
+        action="store_true",
+        help=(
+            "Load the checkpoint on CPU and grow model token embeddings when the tokenizer has "
+            "more ids than the model embedding table. This prevents ONNX CUDA Gather illegal-address "
+            "failures from tokenizer/model vocab mismatches."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -82,6 +91,56 @@ def missing_required_custom_code(checkpoint: Path, source: Path | None) -> list[
     return sorted(filename for filename in wanted if not (checkpoint / filename).is_file())
 
 
+def resize_token_embeddings_if_needed(checkpoint: Path, local_files_only: bool) -> None:
+    try:
+        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+    except Exception as exc:  # pragma: no cover - depends on optional package
+        raise RuntimeError("transformers is required for --resize-token-embeddings.") from exc
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        str(checkpoint),
+        trust_remote_code=True,
+        local_files_only=local_files_only,
+        use_fast=False,
+    )
+    model = AutoModelForSeq2SeqLM.from_pretrained(
+        str(checkpoint),
+        trust_remote_code=True,
+        local_files_only=True,
+    )
+    embedding = model.get_input_embeddings() if hasattr(model, "get_input_embeddings") else None
+    if embedding is None or not hasattr(embedding, "num_embeddings"):
+        print("Tokenizer/model vocab check skipped: model has no inspectable input embedding.")
+        return
+
+    tokenizer_size = len(tokenizer)
+    embedding_size = int(embedding.num_embeddings)
+    config_vocab_size = getattr(getattr(model, "config", None), "vocab_size", None)
+    if tokenizer_size <= embedding_size:
+        print(
+            "Tokenizer/model vocab check: "
+            f"tokenizer_size={tokenizer_size}, embedding_size={embedding_size}, "
+            f"config_vocab_size={config_vocab_size}; no resize needed."
+        )
+        return
+
+    print(
+        "Tokenizer/model vocab mismatch detected; resizing token embeddings: "
+        f"tokenizer_size={tokenizer_size}, embedding_size={embedding_size}, "
+        f"config_vocab_size={config_vocab_size}"
+    )
+    if not hasattr(model, "resize_token_embeddings"):
+        raise RuntimeError(f"Model class {type(model).__name__} does not support resize_token_embeddings.")
+    model.resize_token_embeddings(tokenizer_size)
+    if hasattr(model, "config"):
+        model.config.vocab_size = tokenizer_size
+    if getattr(model, "generation_config", None) is not None and hasattr(model.generation_config, "vocab_size"):
+        model.generation_config.vocab_size = tokenizer_size
+    model.save_pretrained(checkpoint, safe_serialization=True)
+    tokenizer.save_pretrained(checkpoint)
+    print(f"Resized token embeddings to tokenizer size {tokenizer_size}: {checkpoint}")
+
+
 def main() -> None:
     args = parse_args()
     checkpoint = Path(args.checkpoint).expanduser()
@@ -102,6 +161,13 @@ def main() -> None:
         if source is not None:
             print(f"Resolved source assets from: {source}", file=sys.stderr)
         raise SystemExit(1)
+
+    if args.resize_token_embeddings:
+        try:
+            resize_token_embeddings_if_needed(checkpoint, local_files_only=args.local_files_only)
+        except RuntimeError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
 
     print(f"Repaired tokenizer/custom-code files for: {checkpoint}")
     if source is not None:

@@ -27,6 +27,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from scenic_train_chatlm_sft import (  # noqa: E402
     append_eos_to_targets,
+    ensure_token_embeddings_cover_tokenizer,
     repair_checkpoint_for_auto_load,
     repair_tokenizer_files_for_auto_load,
     sanitize_model_for_save,
@@ -355,6 +356,7 @@ def load_model_and_tokenizer(args: argparse.Namespace, model_path: str, state: D
     model = AutoModelForSeq2SeqLM.from_pretrained(model_path, **model_kwargs)
     if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
         tokenizer.pad_token = tokenizer.eos_token
+    ensure_token_embeddings_cover_tokenizer(model, tokenizer, state)
     if hasattr(model.config, "use_cache"):
         model.config.use_cache = True
     model.to(state.device)
