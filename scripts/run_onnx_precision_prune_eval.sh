@@ -190,6 +190,7 @@ ONNX_CUDA_DO_COPY_IN_DEFAULT_STREAM="${ONNX_CUDA_DO_COPY_IN_DEFAULT_STREAM:-1}"
 ONNX_CUDA_CUDNN_CONV_ALGO_SEARCH="${ONNX_CUDA_CUDNN_CONV_ALGO_SEARCH:-HEURISTIC}"
 ONNX_CUDA_ENABLE_CUDA_GRAPH="${ONNX_CUDA_ENABLE_CUDA_GRAPH:-0}"
 ONNX_CUDA_GPU_MEM_LIMIT="${ONNX_CUDA_GPU_MEM_LIMIT:-}"
+ONNX_DISABLE_IO_BINDING="${ONNX_DISABLE_IO_BINDING:-0}"
 
 LATENCY_SEQ_LENGTHS="${LATENCY_SEQ_LENGTHS:-64 128}"
 LATENCY_BATCH_SIZE="${LATENCY_BATCH_SIZE:-1}"
@@ -802,10 +803,12 @@ evaluate_accuracy_variant() {
   ONNX_CUDA_CUDNN_CONV_ALGO_SEARCH="$ONNX_CUDA_CUDNN_CONV_ALGO_SEARCH" \
   ONNX_CUDA_ENABLE_CUDA_GRAPH="$ONNX_CUDA_ENABLE_CUDA_GRAPH" \
   ONNX_CUDA_GPU_MEM_LIMIT="$ONNX_CUDA_GPU_MEM_LIMIT" \
+  ONNX_DISABLE_IO_BINDING="$ONNX_DISABLE_IO_BINDING" \
   "$PYTHON" - "${ACCURACY_EXTRA_ARGS[@]}" <<'PY'
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from datetime import datetime, timezone
@@ -919,6 +922,72 @@ def cuda_provider_options() -> dict[str, str]:
     if gpu_mem_limit:
         options["gpu_mem_limit"] = gpu_mem_limit
     return options
+
+
+def disable_ort_io_binding(model: Any) -> list[dict[str, Any]]:
+    """Turn off Optimum IO binding on known nested ORT objects.
+
+    Some CUDA EP builds hit illegal-memory-access failures in generation when
+    Optimum drives sessions through run_with_iobinding. Keeping CUDA EP but
+    using normal ORT feeds avoids that path.
+    """
+    changed: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    child_attrs = (
+        "encoder",
+        "decoder",
+        "decoder_with_past",
+        "encoder_model",
+        "decoder_model",
+        "decoder_with_past_model",
+        "model",
+        "_encoder",
+        "_decoder",
+        "_decoder_with_past",
+    )
+
+    def visit(name: str, obj: Any, depth: int = 0) -> None:
+        if obj is None or depth > 5:
+            return
+        obj_id = id(obj)
+        if obj_id in seen:
+            return
+        seen.add(obj_id)
+        try:
+            previous = getattr(obj, "use_io_binding")
+        except Exception:
+            previous = None
+            has_io_binding = False
+        else:
+            has_io_binding = True
+        if has_io_binding:
+            try:
+                setattr(obj, "use_io_binding", False)
+                previous_json: Any = previous
+                if not isinstance(previous_json, (str, int, float, bool, type(None))):
+                    previous_json = repr(previous_json)
+                changed.append({"path": name, "previous": previous_json})
+            except Exception as exc:
+                changed.append({"path": name, "error": str(exc)})
+        for child_attr in child_attrs:
+            try:
+                child = getattr(obj, child_attr)
+            except Exception:
+                continue
+            visit(f"{name}.{child_attr}", child, depth + 1)
+        try:
+            sessions = getattr(obj, "sessions")
+        except Exception:
+            sessions = None
+        if isinstance(sessions, (list, tuple)):
+            for index, session in enumerate(sessions):
+                visit(f"{name}.sessions[{index}]", session, depth + 1)
+        elif isinstance(sessions, dict):
+            for key, session in sessions.items():
+                visit(f"{name}.sessions[{key!r}]", session, depth + 1)
+
+    visit("ort_model", model)
+    return changed
 
 
 def max_prompt_token_id(records: list[dict[str, Any]], tokenizer: Any, max_length: int) -> int:
@@ -1052,6 +1121,8 @@ if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
 model_summary: dict[str, Any] = {}
 engine_cache_dir: Path | None = None
 provider_options: dict[str, Any] | None = None
+onnx_disable_io_binding = runtime != "pytorch" and env_bool("ONNX_DISABLE_IO_BINDING", False)
+onnx_io_binding_disabled_paths: list[dict[str, Any]] = []
 if runtime == "pytorch":
     load_kwargs: dict[str, Any] = {
         "trust_remote_code": args.trust_remote_code,
@@ -1083,13 +1154,27 @@ elif runtime in {"onnx", "tensorrt"}:
         }
     elif provider == "CUDAExecutionProvider":
         provider_options = cuda_provider_options()
-    ort_model = ORTModelForSeq2SeqLM.from_pretrained(
-        str(source_path),
-        provider=provider,
-        provider_options=provider_options,
-        local_files_only=True,
-        trust_remote_code=args.trust_remote_code,
-    )
+    ort_load_kwargs: dict[str, Any] = {
+        "provider": provider,
+        "provider_options": provider_options,
+        "local_files_only": True,
+        "trust_remote_code": args.trust_remote_code,
+    }
+    if onnx_disable_io_binding:
+        ort_load_kwargs["use_io_binding"] = False
+    try:
+        ort_model = ORTModelForSeq2SeqLM.from_pretrained(str(source_path), **ort_load_kwargs)
+    except TypeError as exc:
+        if "use_io_binding" not in ort_load_kwargs:
+            raise
+        message = str(exc)
+        if "use_io_binding" not in message and "unexpected keyword" not in message:
+            raise
+        ort_load_kwargs.pop("use_io_binding")
+        ort_model = ORTModelForSeq2SeqLM.from_pretrained(str(source_path), **ort_load_kwargs)
+    if onnx_disable_io_binding:
+        onnx_io_binding_disabled_paths = disable_ort_io_binding(ort_model)
+        print(f"ONNX_DISABLE_IO_BINDING=1; disabled Optimum IO binding on {len(onnx_io_binding_disabled_paths)} object(s).")
     model = GenerateAdapter(ort_model)
 else:
     raise ValueError(f"Unknown runtime: {runtime}")
@@ -1136,6 +1221,8 @@ report = {
     "tokenizer_path": tokenizer_path,
     "onnx_provider": provider if runtime != "pytorch" else None,
     "onnx_provider_options": provider_options,
+    "onnx_disable_io_binding": onnx_disable_io_binding if runtime != "pytorch" else None,
+    "onnx_io_binding_disabled_paths": onnx_io_binding_disabled_paths,
     "model_or_engine_size_bytes": engine_size_bytes or path_size_bytes(source_path),
     "model_or_engine_size_mb": (engine_size_bytes or path_size_bytes(source_path)) / 1_000_000,
     "tensorrt_engine_cache_dir": str(engine_cache_dir) if engine_cache_dir is not None else None,

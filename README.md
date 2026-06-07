@@ -1,10 +1,10 @@
 # SCENIC ED
 
 ```bash
-git pull && CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NPROC_PER_NODE=8 ACCURACY_GPU_IDS=0,1,2,3,4,5,6,7 ACCURACY_SHARD_PARALLELISM=8 FP16_ONNX_PROVIDER=CUDAExecutionProvider INT8_ONNX_PROVIDER=CUDAExecutionProvider bash scripts/run_clean_h20_onnx_fp16_int8.sh charent/ChatLM-mini-Chinese
+git pull && CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NPROC_PER_NODE=8 ACCURACY_GPU_IDS=0,1,2,3,4,5,6,7 ACCURACY_SHARD_PARALLELISM=8 ONNX_DISABLE_IO_BINDING=1 ONNX_OPSET=18 FP16_ONNX_PROVIDER=CUDAExecutionProvider INT8_ONNX_PROVIDER=CUDAExecutionProvider bash scripts/run_clean_h20_onnx_fp16_int8.sh charent/ChatLM-mini-Chinese
 ```
 
-The clean launcher repairs every fine-tuned/pruned checkpoint from the original Hugging Face base model source, so `modeling*.py` / `modeling_chat*.py` comes from `charent/ChatLM-mini-Chinese` unless you explicitly override `SOURCE_ASSET_DIR`.
+The clean launcher repairs every fine-tuned/pruned checkpoint from the original Hugging Face base model source, so `modeling*.py` / `modeling_chat*.py` comes from `charent/ChatLM-mini-Chinese` unless you explicitly override `SOURCE_ASSET_DIR`. It keeps ONNX Runtime on CUDA but sets `ONNX_DISABLE_IO_BINDING=1` by default because the persistent CUDA 700 `/embed_tokens/Gather` crash is coming from Optimum's `run_with_iobinding` generation path.
 
 Verified H20 ONNX Runtime GPU setup:
 
@@ -38,12 +38,13 @@ ACCURACY_SHARD_PARALLELISM=4 \
 FINETUNE_MODE=contrastive \
 FINETUNE_TRAIN_JSON=data/SCENIC_full_anchor_positive_negative.json \
 FP16_ONNX_PROVIDER=CUDAExecutionProvider \
+ONNX_DISABLE_IO_BINDING=1 \
 RUN_PYTORCH_ACCURACY=0 \
 RUN_RUNTIME_BENCHMARK=0 \
 bash scripts/run_gradient50_onnx_quant_baseline.sh charent/ChatLM-mini-Chinese
 ```
 
-This default launcher uses 5-epoch contrastive SFT plus 50% gradient one-shot pruning, matching the strongest 50% one-shot row from the current results. ONNX FP16 should use `CUDAExecutionProvider`. `RUN_ACCURACY_SHARDED=1` splits benchmark/training accuracy examples across the listed GPUs and merges EM1/EM5 afterward, so the accuracy-retention check is much faster than one long single-GPU/CPU generation pass. `ACCURACY_SHARD_PARALLELISM=4` uses the 8 GPU ids in safer waves of 4 workers to avoid CUDA 700 illegal-memory-access failures from too many concurrent ONNX Runtime sessions; raise it to `8` only if the node is stable. `RUN_PYTORCH_ACCURACY=0` skips the slow PyTorch dense/pruned generation rows, and `RUN_RUNTIME_BENCHMARK=0` skips latency/TPS because those edge metrics are only a guideline. Dynamic ONNX INT8 may still be slower or fall back because CUDA EP does not accelerate every quantized operator. If you only need benchmark accuracy and want to skip full training-data EM, add `MAX_TRAIN_EXAMPLES=0` to the command.
+This default launcher uses 5-epoch contrastive SFT plus 50% gradient one-shot pruning, matching the strongest 50% one-shot row from the current results. ONNX FP16 should use `CUDAExecutionProvider`. `ONNX_DISABLE_IO_BINDING=1` still uses CUDA EP but avoids Optimum's IO-binding call path during generation, which is where the recurring CUDA illegal-address Gather failure appears. `RUN_ACCURACY_SHARDED=1` splits benchmark/training accuracy examples across the listed GPUs and merges EM1/EM5 afterward, so the accuracy-retention check is much faster than one long single-GPU/CPU generation pass. `ACCURACY_SHARD_PARALLELISM=4` uses the 8 GPU ids in safer waves of 4 workers; raise it to `8` only if the node is stable. `RUN_PYTORCH_ACCURACY=0` skips the slow PyTorch dense/pruned generation rows, and `RUN_RUNTIME_BENCHMARK=0` skips latency/TPS because those edge metrics are only a guideline. Dynamic ONNX INT8 may still be slower or fall back because CUDA EP does not accelerate every quantized operator. If you only need benchmark accuracy and want to skip full training-data EM, add `MAX_TRAIN_EXAMPLES=0` to the command.
 
 SCENIC edge-device training utilities and compact dataset artifacts for ChatLM-mini-Chinese SFT experiments.
 
