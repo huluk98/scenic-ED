@@ -66,6 +66,7 @@ Accuracy:
   RUN_ACCURACY_SHARDED=0
   ACCURACY_SHARD_PARALLELISM=0 # 0 means all shard GPUs at once
   ACCURACY_SHARD_RETRIES=1
+  ACCURACY_SHARD_STREAM_LOGS=0
   ACCURACY_GPU_IDS="0,1,2,3,4,5,6,7"
   ALIGN_TOKENIZER_EMBEDDINGS=1
 
@@ -181,6 +182,7 @@ ACCURACY_SHARD_PARALLELISM="${ACCURACY_SHARD_PARALLELISM:-0}"
 ACCURACY_SHARD_RETRIES="${ACCURACY_SHARD_RETRIES:-1}"
 ACCURACY_SHARD_RETRY_DELAY_SECONDS="${ACCURACY_SHARD_RETRY_DELAY_SECONDS:-5}"
 ACCURACY_CUDA_LAUNCH_BLOCKING_ON_RETRY="${ACCURACY_CUDA_LAUNCH_BLOCKING_ON_RETRY:-1}"
+ACCURACY_SHARD_STREAM_LOGS="${ACCURACY_SHARD_STREAM_LOGS:-0}"
 ACCURACY_GPU_IDS="${ACCURACY_GPU_IDS:-}"
 ACCURACY_PYTORCH_DEVICE="${ACCURACY_PYTORCH_DEVICE:-cuda}"
 ALIGN_TOKENIZER_EMBEDDINGS="${ALIGN_TOKENIZER_EMBEDDINGS:-1}"
@@ -1441,16 +1443,32 @@ evaluate_accuracy_variant_sharded() {
       local shard_json="${shard_dir}/shard_${shard_index}.json"
       local shard_log="${shard_dir}/shard_${shard_index}.log"
       echo "Starting ${pretty_label} shard ${shard_index}/${shard_count} on GPU ${gpu} (attempt $((retry + 1)))"
-      (
-        export CUDA_VISIBLE_DEVICES="$gpu"
-        export PYTORCH_DEVICE="$ACCURACY_PYTORCH_DEVICE"
-        export ACCURACY_SHARD_INDEX="$shard_index"
-        export ACCURACY_SHARD_COUNT="$shard_count"
-        if [[ "$retry" -gt 0 ]] && truthy "$ACCURACY_CUDA_LAUNCH_BLOCKING_ON_RETRY"; then
-          export CUDA_LAUNCH_BLOCKING=1
-        fi
-        evaluate_accuracy_variant "${eval_args[@]}" "$shard_json"
-      ) >"$shard_log" 2>&1 &
+      : >"$shard_log"
+      if truthy "$ACCURACY_SHARD_STREAM_LOGS"; then
+        (
+          export CUDA_VISIBLE_DEVICES="$gpu"
+          export PYTORCH_DEVICE="$ACCURACY_PYTORCH_DEVICE"
+          export PYTHONUNBUFFERED=1
+          export ACCURACY_SHARD_INDEX="$shard_index"
+          export ACCURACY_SHARD_COUNT="$shard_count"
+          if [[ "$retry" -gt 0 ]] && truthy "$ACCURACY_CUDA_LAUNCH_BLOCKING_ON_RETRY"; then
+            export CUDA_LAUNCH_BLOCKING=1
+          fi
+          evaluate_accuracy_variant "${eval_args[@]}" "$shard_json"
+        ) > >(awk -v prefix="[${pretty_label} shard ${shard_index} gpu ${gpu}] " '{ print prefix $0; fflush() }' | tee "$shard_log") 2>&1 &
+      else
+        (
+          export CUDA_VISIBLE_DEVICES="$gpu"
+          export PYTORCH_DEVICE="$ACCURACY_PYTORCH_DEVICE"
+          export PYTHONUNBUFFERED=1
+          export ACCURACY_SHARD_INDEX="$shard_index"
+          export ACCURACY_SHARD_COUNT="$shard_count"
+          if [[ "$retry" -gt 0 ]] && truthy "$ACCURACY_CUDA_LAUNCH_BLOCKING_ON_RETRY"; then
+            export CUDA_LAUNCH_BLOCKING=1
+          fi
+          evaluate_accuracy_variant "${eval_args[@]}" "$shard_json"
+        ) >"$shard_log" 2>&1 &
+      fi
       running_pids+=("$!")
       running_indices+=("$shard_index")
       running_labels+=("${pretty_label} shard ${shard_index} gpu ${gpu}")
