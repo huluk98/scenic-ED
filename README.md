@@ -6,6 +6,14 @@ git pull && OUTPUT_ROOT=onnx_eval_outputs/clean_h20_contrastive_gradient50_YYYYM
 
 Replace `YYYYMMDD_HHMMSS` with the existing run folder. This top command reuses completed training/pruning/ONNX export and reruns accuracy only.
 
+FP32 CPU raw-logit parity check first, before FP16/INT8/CUDA/EM debugging:
+
+```bash
+git pull && bash scripts/run_fp32_cpu_onnx_parity.sh onnx_eval_outputs/clean_h20_contrastive_gradient50_YYYYMMDD_HHMMSS charent/ChatLM-mini-Chinese
+```
+
+This exports FP32 ONNX on CPU only, skips quantization and EM generation, removes any live torch pruning reparameterizations before export, disables ONNX Runtime graph optimizations, and compares raw PyTorch-vs-ONNX logits on identical inputs. If this does not match, fix conversion before interpreting EM1/EM5.
+
 Latency/TPS test-drive only, one worker per GPU, no accuracy generation:
 
 ```bash
