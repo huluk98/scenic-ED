@@ -17,10 +17,10 @@ This exports FP32 ONNX on CPU only, skips quantization and EM generation, remove
 Latency/TPS test-drive only, one worker per GPU, no accuracy generation:
 
 ```bash
-git pull && ONNX_DISABLE_IO_BINDING=1 FP16_ONNX_PROVIDER=CUDAExecutionProvider INT8_ONNX_PROVIDER=CUDAExecutionProvider bash scripts/run_latency_testdrive_8gpu.sh onnx_eval_outputs/clean_h20_contrastive_gradient50_YYYYMMDD_HHMMSS charent/ChatLM-mini-Chinese
+git pull && sh scripts/run_latency_smoke_compare.sh onnx_eval_outputs/clean_h20_contrastive_gradient50_YYYYMMDD_HHMMSS charent/ChatLM-mini-Chinese
 ```
 
-This smoke test defaults to `LATENCY_SEQ_LENGTHS=64 LATENCY_QUERIES=5 LATENCY_WARMUP=1 LATENCY_MAX_NEW_TOKENS=32`, skips PyTorch latency, and writes per-GPU JSON/log files under `<OUTPUT_ROOT>/reports/latency_testdrive_8gpu/`.
+This smoke test defaults to `LATENCY_GPU_IDS=0 LATENCY_SEQ_LENGTHS=64 LATENCY_QUERIES=10 LATENCY_WARMUP=1 LATENCY_MAX_NEW_TOKENS=32`, skips PyTorch latency, and writes Markdown/CSV/JSON comparison tables under `<OUTPUT_ROOT>/reports/latency_smoke_seq64_q10/`.
 
 For a fresh full run, omit `OUTPUT_ROOT=... ACCURACY_ONLY=1`:
 
