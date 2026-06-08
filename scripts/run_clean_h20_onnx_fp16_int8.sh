@@ -30,6 +30,7 @@ Useful overrides:
   MAX_TRAIN_EXAMPLES=0
   MAX_BENCHMARK_EXAMPLES=200
   ACCURACY_ONLY=1 with OUTPUT_ROOT=<existing-run> reuses existing checkpoints/ONNX exports.
+  ENFORCE_CONTRASTIVE_GRADIENT50=0 only for deliberately different ablations.
 
 Final report:
   <OUTPUT_ROOT>/all_deployment_em_latency_report.json
@@ -85,6 +86,7 @@ export PRUNE_METHOD="${PRUNE_METHOD:-gradient}"
 export SPARSITY="${SPARSITY:-0.5}"
 export PRUNED_VARIANT="${PRUNED_VARIANT:-clean_contrastive_gradient50}"
 export PRUNED_PRETTY_LABEL="${PRUNED_PRETTY_LABEL:-clean contrastive 50% gradient one-shot pruned}"
+export ENFORCE_CONTRASTIVE_GRADIENT50="${ENFORCE_CONTRASTIVE_GRADIENT50:-1}"
 
 export RUN_INT8="${RUN_INT8:-1}"
 export RUN_TENSORRT="${RUN_TENSORRT:-0}"

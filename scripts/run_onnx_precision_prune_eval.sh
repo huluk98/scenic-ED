@@ -7,7 +7,7 @@ Usage:
   bash scripts/run_onnx_precision_prune_eval.sh <original-model-path-or-hf-id> [accuracy eval args]
 
 End-to-end SCENIC deployment pass:
-  1. Fine-tune the original model for 5 epochs with regular SFT.
+  1. Fine-tune the original model for 5 epochs with FINETUNE_MODE.
   2. Create a 50% gradient one-shot pruned checkpoint from the fine-tuned model.
   3. Export dense and gradient-pruned checkpoints to ONNX FP16.
   4. Export FP32 ONNX sources and dynamic-quantize them to ONNX INT8.
@@ -92,6 +92,7 @@ TensorRT:
 INT8:
   RUN_INT8=1
   INT8_ONNX_PROVIDER=CUDAExecutionProvider
+  ENFORCE_CONTRASTIVE_GRADIENT50=1 # require contrastive SFT + gradient + SPARSITY=0.5
 
 Example smoke test:
   FINETUNE_EPOCHS=1 MAX_BENCHMARK_EXAMPLES=20 MAX_TRAIN_EXAMPLES=20 LATENCY_QUERIES=20 \
@@ -229,6 +230,7 @@ fi
 OPTIMUM_DTYPE_MODE="${OPTIMUM_DTYPE_MODE:-auto}"
 FORCE_EXPORT="${FORCE_EXPORT:-0}"
 FORCE_QUANTIZE="${FORCE_QUANTIZE:-0}"
+ENFORCE_CONTRASTIVE_GRADIENT50="${ENFORCE_CONTRASTIVE_GRADIENT50:-0}"
 
 if command -v nvidia-smi >/dev/null 2>&1; then
   EXPORT_DEVICE="${EXPORT_DEVICE:-cuda}"
@@ -260,6 +262,97 @@ truthy() {
     *) return 1 ;;
   esac
 }
+
+require_contrastive_gradient50_contract() {
+  local ok=1
+
+  if [[ "$FINETUNE_MODE" != "contrastive" ]]; then
+    echo "Expected FINETUNE_MODE=contrastive for the contrastive-gradient50 ONNX contract; got ${FINETUNE_MODE}" >&2
+    ok=0
+  fi
+  if [[ "$FINETUNE_TRAIN_JSON" != "data/SCENIC_full_anchor_positive_negative.json" ]]; then
+    echo "Expected FINETUNE_TRAIN_JSON=data/SCENIC_full_anchor_positive_negative.json for contrastive SFT; got ${FINETUNE_TRAIN_JSON}" >&2
+    ok=0
+  fi
+  if [[ "$PRUNE_METHOD" != "gradient" ]]; then
+    echo "Expected PRUNE_METHOD=gradient for the highest-scored 50% contrastive row; got ${PRUNE_METHOD}" >&2
+    ok=0
+  fi
+  case "$SPARSITY" in
+    0.5|.5|0.50) ;;
+    *)
+      echo "Expected SPARSITY=0.5 for the 50% pruned ONNX exports; got ${SPARSITY}" >&2
+      ok=0
+      ;;
+  esac
+
+  if [[ "$ok" -ne 1 ]]; then
+    echo "Refusing to run because ENFORCE_CONTRASTIVE_GRADIENT50=1. Set it to 0 only for an intentional ablation." >&2
+    exit 2
+  fi
+}
+
+verify_pruned_summary_contract() {
+  if ! truthy "$ENFORCE_CONTRASTIVE_GRADIENT50" || [[ ! -f "$PRUNED_SUMMARY_JSON" ]]; then
+    return
+  fi
+
+  SUMMARY_JSON="$PRUNED_SUMMARY_JSON" \
+  "$PYTHON" <<'PY'
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+summary_json = Path(os.environ["SUMMARY_JSON"])
+with summary_json.open("r", encoding="utf-8") as handle:
+    payload = json.load(handle)
+
+errors: list[str] = []
+pruning = payload.get("pruning") or {}
+method = pruning.get("method")
+if method != "gradient":
+    errors.append(f"pruning.method is {method!r}, expected 'gradient'")
+sparsity = pruning.get("sparsity", pruning.get("target_sparsity"))
+try:
+    sparsity_value = float(sparsity)
+except (TypeError, ValueError):
+    errors.append(f"pruning sparsity is {sparsity!r}, expected 0.5")
+else:
+    if abs(sparsity_value - 0.5) > 1e-9:
+        errors.append(f"pruning sparsity is {sparsity_value}, expected 0.5")
+
+fine_tune = payload.get("fine_tune")
+if fine_tune is None:
+    print(
+        f"WARNING: {summary_json} predates fine_tune provenance metadata; "
+        "method/sparsity matched, but SFT mode cannot be proven from this summary.",
+        file=sys.stderr,
+    )
+else:
+    mode = fine_tune.get("mode")
+    train_json = fine_tune.get("train_json")
+    if mode != "contrastive":
+        errors.append(f"fine_tune.mode is {mode!r}, expected 'contrastive'")
+    if train_json != "data/SCENIC_full_anchor_positive_negative.json":
+        errors.append(
+            "fine_tune.train_json is "
+            f"{train_json!r}, expected 'data/SCENIC_full_anchor_positive_negative.json'"
+        )
+
+if errors:
+    print(f"{summary_json} does not match the contrastive-gradient50 ONNX contract:", file=sys.stderr)
+    for error in errors:
+        print(f"  - {error}", file=sys.stderr)
+    sys.exit(2)
+PY
+}
+
+if truthy "$ENFORCE_CONTRASTIVE_GRADIENT50"; then
+  require_contrastive_gradient50_contract
+fi
 
 detect_accuracy_gpu_ids() {
   if [[ -n "$ACCURACY_GPU_IDS" ]]; then
@@ -533,6 +626,11 @@ create_pruned_checkpoint() {
   PRUNE_SCOPE="$PRUNE_SCOPE" \
   SPARSITY_BASIS="$SPARSITY_BASIS" \
   PRUNE_LM_HEAD="$PRUNE_LM_HEAD" \
+  FINETUNE_MODE="$FINETUNE_MODE" \
+  FINETUNE_EPOCHS="$FINETUNE_EPOCHS" \
+  FINETUNE_TRAIN_JSON="$FINETUNE_TRAIN_JSON" \
+  PRUNED_VARIANT="$PRUNED_VARIANT" \
+  PRUNED_PRETTY_LABEL="$PRUNED_PRETTY_LABEL" \
   CALIBRATION_JSON="$CALIBRATION_JSON" \
   CALIBRATION_BATCH_SIZE="$CALIBRATION_BATCH_SIZE" \
   CALIBRATION_BATCHES="$CALIBRATION_BATCHES" \
@@ -629,6 +727,20 @@ write_json(
         "device": str(device),
         "calibration_json": str(calibration_json),
         "calibration_examples_loaded": len(calibration_records),
+        "fine_tune": {
+            "mode": os.environ["FINETUNE_MODE"],
+            "epochs": int(os.environ["FINETUNE_EPOCHS"]),
+            "train_json": os.environ["FINETUNE_TRAIN_JSON"],
+        },
+        "pruning_contract": {
+            "variant": os.environ["PRUNED_VARIANT"],
+            "label": os.environ["PRUNED_PRETTY_LABEL"],
+            "method": os.environ["PRUNE_METHOD"],
+            "requested_sparsity": float(os.environ["SPARSITY"]),
+            "scope": os.environ["PRUNE_SCOPE"],
+            "sparsity_basis": os.environ["SPARSITY_BASIS"],
+            "prune_lm_head": env_bool("PRUNE_LM_HEAD", False),
+        },
         "model_before_prune": before,
         "model_after_prune": after,
         "pruning": pruning,
@@ -2208,6 +2320,19 @@ write_final_report() {
   PRUNED_PRETTY_LABEL="$PRUNED_PRETTY_LABEL" \
   PRUNE_METHOD="$PRUNE_METHOD" \
   SPARSITY="$SPARSITY" \
+  PRUNED_VARIANT="$PRUNED_VARIANT" \
+  FINETUNE_MODE="$FINETUNE_MODE" \
+  FINETUNE_EPOCHS="$FINETUNE_EPOCHS" \
+  FINETUNE_TRAIN_JSON="$FINETUNE_TRAIN_JSON" \
+  PRUNE_SCOPE="$PRUNE_SCOPE" \
+  SPARSITY_BASIS="$SPARSITY_BASIS" \
+  PRUNE_LM_HEAD="$PRUNE_LM_HEAD" \
+  CALIBRATION_JSON="$CALIBRATION_JSON" \
+  FP16_DENSE_ONNX="$FP16_DENSE_ONNX" \
+  FP16_PRUNED_ONNX="$FP16_PRUNED_ONNX" \
+  INT8_DENSE_ONNX="$INT8_DENSE_ONNX" \
+  INT8_PRUNED_ONNX="$INT8_PRUNED_ONNX" \
+  ENFORCE_CONTRASTIVE_GRADIENT50="$ENFORCE_CONTRASTIVE_GRADIENT50" \
   RUNTIME_BENCHMARK_JSON="$RUNTIME_BENCHMARK_JSON" \
   REPORT_ROOT="$REPORT_ROOT" \
   RUN_INT8="$RUN_INT8" \
@@ -2367,9 +2492,31 @@ payload = {
     "fine_tuned_checkpoint_path": os.environ["FINETUNED_CHECKPOINT_DIR"],
     "pruned_checkpoint_path": os.environ["PRUNED_CHECKPOINT_DIR"],
     "pruning_summary_json": os.environ["PRUNED_SUMMARY_JSON"],
+    "fine_tune": {
+        "mode": os.environ["FINETUNE_MODE"],
+        "epochs": int(os.environ["FINETUNE_EPOCHS"]),
+        "train_json": os.environ["FINETUNE_TRAIN_JSON"],
+    },
     "pruning_method": os.environ["PRUNE_METHOD"],
     "requested_sparsity": float(os.environ["SPARSITY"]),
     "pruned_variant_label": pruned_label,
+    "pruning_contract": {
+        "variant": os.environ["PRUNED_VARIANT"],
+        "label": pruned_label,
+        "method": os.environ["PRUNE_METHOD"],
+        "requested_sparsity": float(os.environ["SPARSITY"]),
+        "scope": os.environ["PRUNE_SCOPE"],
+        "sparsity_basis": os.environ["SPARSITY_BASIS"],
+        "prune_lm_head": env_bool("PRUNE_LM_HEAD", False),
+        "calibration_json": os.environ["CALIBRATION_JSON"],
+        "enforce_contrastive_gradient50": env_bool("ENFORCE_CONTRASTIVE_GRADIENT50", False),
+    },
+    "onnx_artifacts": {
+        "fp16_dense": os.environ["FP16_DENSE_ONNX"],
+        "fp16_pruned": os.environ["FP16_PRUNED_ONNX"],
+        "int8_dense": os.environ["INT8_DENSE_ONNX"],
+        "int8_pruned": os.environ["INT8_PRUNED_ONNX"],
+    },
     "output_root": os.environ["OUTPUT_ROOT"],
     "metric_contract": {
         "runtime": "PyTorch FP16, ONNX FP16, and ONNX INT8 by default; optional TensorRT FP16 with RUN_TENSORRT=1",
@@ -2411,6 +2558,7 @@ echo "Accuracy generation: beams=${NUM_BEAMS}, returns=${NUM_RETURN_SEQUENCES}, 
 run_finetune
 repair_checkpoint_assets "$FINETUNED_CHECKPOINT_DIR" "$SOURCE_ASSET_DIR" "fine-tuned checkpoint"
 create_pruned_checkpoint
+verify_pruned_summary_contract
 repair_checkpoint_assets "$PRUNED_CHECKPOINT_DIR" "$FINETUNED_CHECKPOINT_DIR" "${PRUNED_PRETTY_LABEL} checkpoint"
 
 export_onnx "$FINETUNED_CHECKPOINT_DIR" "$FP16_DENSE_ONNX" "fine-tuned dense FP16" "fp16" "$EXPORT_DEVICE"
