@@ -949,6 +949,8 @@ SUMMARY_COLUMNS = [
     "pruning_config_json",
     "checkpoint_path",
     "mask_path",
+    "prediction_path",
+    "progressive_log_path",
 ]
 
 
@@ -1081,6 +1083,8 @@ def run_single_experiment(
     pruning_summary: dict[str, Any] = {"mode": mode, "target_sparsity": target_sparsity}
     mask_path = ""
     checkpoint_path = str(args.model_checkpoint)
+    prediction_path = output_dir / f"predictions_{args.model_family}_{mode}_{filename_sparsity(target_sparsity)}_{args.seed}.csv"
+    progressive_log_path = ""
     progressive_log_rows: list[dict[str, Any]] = []
 
     if mode == "oneshot":
@@ -1149,10 +1153,10 @@ def run_single_experiment(
         save_masks(Path(mask_path), masks, {"target_sparsity": target_sparsity, "mode": mode, "summary": pruning_summary})
         save_model_checkpoint(model, tokenizer, checkpoint_dir)
         checkpoint_path = str(checkpoint_dir)
-        write_progressive_log(
-            output_dir / f"progressive_logs_{args.model_family}_{filename_sparsity(target_sparsity)}_{args.seed}.csv",
-            progressive_log_rows,
+        progressive_log_path = str(
+            output_dir / f"progressive_logs_{args.model_family}_{filename_sparsity(target_sparsity)}_{args.seed}.csv"
         )
+        write_progressive_log(Path(progressive_log_path), progressive_log_rows)
     else:
         apply_masks(modules, masks)
 
@@ -1175,6 +1179,8 @@ def run_single_experiment(
         "pruning_config_json": pruning_json,
         "checkpoint_path": checkpoint_path,
         "mask_path": mask_path,
+        "prediction_path": str(prediction_path),
+        "progressive_log_path": progressive_log_path,
     }
     if mode == "dense" and abs(target_sparsity) <= 1e-9:
         dense_summaries[dense_key] = summary
@@ -1189,7 +1195,6 @@ def run_single_experiment(
         "seed": args.seed,
     }
     prediction_rows = append_metadata_to_rows(eval_result.rows, row_metadata)
-    prediction_path = output_dir / f"predictions_{args.model_family}_{mode}_{filename_sparsity(target_sparsity)}_{args.seed}.csv"
     write_prediction_csv(prediction_path, prediction_rows, row_metadata)
     del model
     if device.type == "cuda":

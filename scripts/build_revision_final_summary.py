@@ -254,8 +254,9 @@ def parse_number(value: Any) -> float | int | str | None:
 def csv_metric_block(row: dict[str, Any]) -> dict[str, Any]:
     def block(group: str) -> dict[str, Any]:
         suffix = "overall" if group == "overall" else group
+        total_key = "count_total" if group == "overall" else f"count_{suffix}"
         return {
-            "total": parse_number(row.get(f"count_{suffix}")),
+            "total": parse_number(row.get(total_key, row.get(f"count_{suffix}"))),
             "em1": parse_number(row.get(f"em1_{suffix}")),
             "em5": parse_number(row.get(f"em5_{suffix}")),
             "em1_retention": parse_number(row.get(f"em1_retention_{suffix}")),
@@ -294,6 +295,8 @@ def summarize_sparsity_csv(path: str | Path) -> list[dict[str, Any]]:
                 "benchmark": csv_metric_block(row),
                 "checkpoint_path": row.get("checkpoint_path"),
                 "mask_path": row.get("mask_path"),
+                "prediction_path": row.get("prediction_path"),
+                "progressive_log_path": row.get("progressive_log_path"),
             }
         )
     return summaries

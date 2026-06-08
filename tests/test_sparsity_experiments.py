@@ -23,6 +23,7 @@ from run_sparsity_experiments import (  # noqa: E402
     sparsity_summary,
     write_summary_csv,
 )
+from build_revision_final_summary import summarize_sparsity_csv  # noqa: E402
 
 
 try:
@@ -138,3 +139,54 @@ def test_summary_csv_includes_difficulty_counts(tmp_path: Path) -> None:
     assert "count_easy" in text
     assert "count_medium" in text
     assert "count_hard" in text
+    assert "prediction_path" in text
+    assert "progressive_log_path" in text
+
+
+def test_revision_summary_reads_overall_count_and_artifact_paths(tmp_path: Path) -> None:
+    summary_csv = tmp_path / "summary_metrics.csv"
+    fieldnames = [
+        "pruning_mode",
+        "pruning_method",
+        "target_sparsity",
+        "targeted_linear_sparsity_actual",
+        "whole_model_sparsity_actual",
+        "seed",
+        "count_total",
+        "em1_overall",
+        "em5_overall",
+        "em1_retention_overall",
+        "em5_retention_overall",
+        "checkpoint_path",
+        "mask_path",
+        "prediction_path",
+        "progressive_log_path",
+    ]
+    with summary_csv.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerow(
+            {
+                "pruning_mode": "progressive",
+                "pruning_method": "magnitude",
+                "target_sparsity": "0.5",
+                "targeted_linear_sparsity_actual": "0.5",
+                "whole_model_sparsity_actual": "0.44",
+                "seed": "42",
+                "count_total": "200",
+                "em1_overall": "0.04",
+                "em5_overall": "0.71",
+                "em1_retention_overall": "0.05",
+                "em5_retention_overall": "0.72",
+                "checkpoint_path": "checkpoints/progressive",
+                "mask_path": "checkpoints/progressive/linear_weight_masks.pt",
+                "prediction_path": "predictions.csv",
+                "progressive_log_path": "progressive_logs.csv",
+            }
+        )
+
+    rows = summarize_sparsity_csv(summary_csv)
+
+    assert rows[0]["benchmark"]["overall"]["total"] == 200
+    assert rows[0]["prediction_path"] == "predictions.csv"
+    assert rows[0]["progressive_log_path"] == "progressive_logs.csv"
