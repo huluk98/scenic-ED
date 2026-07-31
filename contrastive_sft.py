@@ -27,16 +27,11 @@ from scenic_train_chatlm_sft import (  # noqa: E402
 MODEL_PATH = str(PROJECT_ROOT / "models" / "ChatLM-mini-Chinese-local")
 # Examples:
 # MODEL_PATH = str(PROJECT_ROOT / "models" / "ChatLM-mini-Chinese-local")
-# MODEL_PATH = "/nvme1/home/luke/models/chatlm"
 # MODEL_PATH = "charent/ChatLM-mini-Chinese"
 
 TRAIN_JSON = str(PROJECT_ROOT / "data" / "SCENIC_full_anchor_positive_negative.json")
-# Example:
-# TRAIN_JSON = "/nvme1/home/luke/Encoder-Chinese-SLM/data/scenic/SCENIC_full_anchor_positive_negative.json"
 
 OUTPUT_DIR = str(PROJECT_ROOT / "models" / "chatlm_scenic_triplet_sft")
-# Example:
-# OUTPUT_DIR = "/nvme1/home/luke/Encoder-Chinese-SLM/sft_contrastive"
 
 EPOCHS = 5
 BATCH_SIZE = 8

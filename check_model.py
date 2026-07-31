@@ -16,8 +16,6 @@ from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, AutoModelF
 MODEL_PATH = "./sft"
 # Examples:
 # MODEL_PATH = "./sft"
-# MODEL_PATH = "/nvme1/home/luke/models/chatlm"
-# MODEL_PATH = "/nvme1/home/luke/models/qwen2.5-0.5b"
 # MODEL_PATH = "charent/ChatLM-mini-Chinese"
 
 TRUST_REMOTE_CODE = True

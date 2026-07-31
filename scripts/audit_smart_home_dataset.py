@@ -21,7 +21,7 @@ def project_root() -> Path:
 def parse_args() -> argparse.Namespace:
     root = project_root()
     parser = argparse.ArgumentParser(description="Audit smart-home prompt/response dataset quality without editing data.")
-    parser.add_argument("--old", default="/Users/luke/Downloads/619_Luke_fixed_dedup.json")
+    parser.add_argument("--old", default=str(root / "data" / "619_Luke_fixed_dedup.json"))
     parser.add_argument("--new", default=str(root / "data" / "619_Luke_clean_plus_tv_natural_language_dedup.json"))
     parser.add_argument("--report", default=str(root / "reports" / "dataset_audit_report.md"))
     parser.add_argument("--suspicious", default=str(root / "reports" / "suspicious_examples.jsonl"))

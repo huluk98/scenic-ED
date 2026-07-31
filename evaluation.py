@@ -23,13 +23,9 @@ MODEL_PATH = "./models/chatlm_scenic_triplet_sft"
 # Examples:
 # MODEL_PATH = "./sft"
 # MODEL_PATH = "./models/chatlm_scenic_triplet_sft"
-# MODEL_PATH = "/nvme1/home/luke/Encoder-Chinese-SLM/sft_contrastive"
 
 JSON1_PATH = "./data/SCENIC_full_training_dataset.json"
 JSON2_PATH = None
-# Examples:
-# JSON1_PATH = "/nvme1/home/luke/Encoder-Chinese-SLM/data/scenic/SCENIC_full_training_dataset.json"
-# JSON2_PATH = "/nvme1/home/luke/Encoder-Chinese-SLM/data/scenic/YOUR_SECOND_EVAL_FILE.json"
 
 OUTPUT_DIR = "./eval_outputs"
 

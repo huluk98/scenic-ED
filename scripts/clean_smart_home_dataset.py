@@ -10,7 +10,7 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INPUT = PROJECT_ROOT / "data" / "619_Luke_clean_plus_tv_natural_language_dedup.json"
-DEFAULT_REFERENCE = Path("/Users/luke/Downloads/619_Luke_fixed_dedup.json")
+DEFAULT_REFERENCE = PROJECT_ROOT / "data" / "619_Luke_fixed_dedup.json"
 DEFAULT_OUTPUT = PROJECT_ROOT / "data" / "619_Luke_clean_plus_tv_natural_language_REPAIRED.json"
 DEFAULT_LOG = PROJECT_ROOT / "reports" / "repair_log.jsonl"
 DEFAULT_SUMMARY = PROJECT_ROOT / "reports" / "repair_summary.md"
